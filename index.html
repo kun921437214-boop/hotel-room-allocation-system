@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>活动酒店房间分配系统</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <h1>活动房务</h1>
+            <p>MRBS 思路改造样机</p>
+          </div>
+        </div>
+        <nav class="nav" aria-label="主要视图">
+          <button class="nav-item active" data-view="dashboard">总览</button>
+          <button class="nav-item" data-view="calendar">房晚日历</button>
+          <button class="nav-item" data-view="assign">分房</button>
+          <button class="nav-item" data-view="needs">入住需求</button>
+          <button class="nav-item" data-view="rooms">酒店房间</button>
+        </nav>
+        <div class="sidebar-note">
+          <strong>模型参考</strong>
+          <p>酒店 = Area，房间 = Room，入住分配 = Entry。系统会自动检查同房同晚重复分配。</p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">大型朗诵展示活动</p>
+            <h2 id="viewTitle">总览</h2>
+          </div>
+          <div class="toolbar">
+            <label class="search">
+              <span>搜索</span>
+              <input id="searchInput" type="search" placeholder="姓名、酒店、房间号">
+            </label>
+            <button class="ghost-btn" id="exportBtn" type="button">导出 JSON</button>
+            <label class="ghost-btn file-btn">
+              导入 JSON
+              <input id="importInput" type="file" accept="application/json">
+            </label>
+            <button class="danger-btn" id="resetBtn" type="button">恢复样例</button>
+          </div>
+        </header>
+
+        <section class="view active" id="dashboardView" aria-labelledby="viewTitle">
+          <div class="kpi-grid" id="kpiGrid"></div>
+          <div class="dashboard-grid">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h3>今日待处理</h3>
+                  <p>优先处理红色和黄色事项。</p>
+                </div>
+              </div>
+              <div class="task-list" id="taskList"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h3>用途分布</h3>
+                  <p>看工作人员、导师、嘉宾、家庭等占用。</p>
+                </div>
+              </div>
+              <div class="bars" id="useBars"></div>
+            </section>
+            <section class="panel heat-panel">
+              <div class="panel-header">
+                <div>
+                  <h3>酒店日期房量热力表</h3>
+                  <p>按酒店和入住日期查看余量、异常与压力等级。</p>
+                </div>
+              </div>
+              <div class="heatmap-wrap">
+                <div class="heatmap" id="heatmap"></div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="calendarView" aria-labelledby="viewTitle">
+          <div class="filter-row">
+            <label>酒店
+              <select id="calendarHotel"></select>
+            </label>
+            <div class="dialog-field calendar-date-range">
+              <span class="dialog-field-label">日期范围</span>
+              <div class="date-range-picker" data-date-range data-calendar-range>
+                <input id="calendarStartInput" type="hidden" data-range-hidden-start>
+                <input id="calendarEndInput" type="hidden" data-range-hidden-end>
+                <button class="date-range-trigger" type="button" data-range-trigger>
+                  <span data-range-summary>开始日期 至 结束日期</span>
+                  <span class="date-range-calendar-icon" aria-hidden="true"></span>
+                </button>
+                <div class="date-range-panel" data-range-panel hidden>
+                  <input type="hidden" data-range-start>
+                  <input type="hidden" data-range-end>
+                  <div class="date-range-body">
+                    <div class="date-calendar">
+                      <div class="date-calendar-head">
+                        <button type="button" data-range-month-nav="-12">«</button>
+                        <button type="button" data-range-month-nav="-1">‹</button>
+                        <strong data-range-month-title>2026 年 8 月</strong>
+                        <button type="button" data-range-month-nav="1">›</button>
+                        <button type="button" data-range-month-nav="12">»</button>
+                      </div>
+                      <div class="date-week-row">
+                        <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+                      </div>
+                      <div class="date-grid" data-range-calendar></div>
+                    </div>
+                  </div>
+                  <div class="date-range-footer">
+                    <span data-range-draft>请选择开始日期和结束日期</span>
+                    <button class="primary-btn" type="button" data-range-apply>确认</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="legend">
+            <span class="legend-item free">空闲</span>
+            <span class="legend-item reserved">预留/备用</span>
+            <span class="legend-item assigned">已分配</span>
+            <span class="legend-item confirmed">已确认</span>
+            <span class="legend-item checked">已入住</span>
+            <span class="legend-item problem">异常</span>
+          </div>
+          <div class="board" id="roomBoard"></div>
+        </section>
+
+        <section class="view" id="assignView" aria-labelledby="viewTitle">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h3>新增分房</h3>
+                  <p>选择需求、日期和房间，系统会做重复占用检查。</p>
+                </div>
+              </div>
+              <form class="form" id="assignForm">
+                <label>入住需求
+                  <select id="needSelect" required></select>
+                </label>
+                <div class="dialog-field assign-date-range">
+                  <span class="dialog-field-label">入住时间</span>
+                  <div class="date-range-picker" data-date-range data-assignment-range>
+                    <input id="checkInInput" type="hidden" required data-range-hidden-start>
+                    <input id="checkOutInput" type="hidden" required data-range-hidden-end>
+                    <button class="date-range-trigger" type="button" data-range-trigger>
+                      <span data-range-summary>开始日期 至 结束日期</span>
+                      <span class="date-range-calendar-icon" aria-hidden="true"></span>
+                    </button>
+                    <div class="date-range-panel" data-range-panel hidden>
+                      <input type="hidden" data-range-start>
+                      <input type="hidden" data-range-end>
+                      <div class="date-range-body">
+                        <section class="date-calendar">
+                          <div class="date-calendar-head">
+                            <button type="button" data-range-month-nav="-12">«</button>
+                            <button type="button" data-range-month-nav="-1">‹</button>
+                            <strong data-range-month-title></strong>
+                            <button type="button" data-range-month-nav="1">›</button>
+                            <button type="button" data-range-month-nav="12">»</button>
+                          </div>
+                          <div class="date-week-row">
+                            <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+                          </div>
+                          <div class="date-grid" data-range-calendar></div>
+                        </section>
+                      </div>
+                      <div class="date-range-footer">
+                        <span data-range-draft>请选择开始日期和结束日期</span>
+                        <button class="primary-btn" type="button" data-range-apply>确认</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <label>可选房间
+                  <select id="roomSelect" required></select>
+                </label>
+                <label>分配用途
+                  <select id="purposeInput">
+                    <option>工作人员</option>
+                    <option>导师</option>
+                    <option>嘉宾</option>
+                    <option>选手家庭</option>
+                    <option>合作方</option>
+                    <option>领导</option>
+                    <option>志愿者</option>
+                    <option>备用</option>
+                    <option>自己人</option>
+                    <option>其他</option>
+                  </select>
+                </label>
+                <label>备注
+                  <textarea id="assignNote" rows="3" placeholder="例如：需无烟、近电梯、晚到保房"></textarea>
+                </label>
+                <div id="conflictBox" class="conflict-box"></div>
+                <button class="primary-btn" type="submit">创建分配</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h3>最近分配</h3>
+                  <p>按创建顺序展示最新操作。</p>
+                </div>
+              </div>
+              <div class="assignment-list" id="assignmentList"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="needsView" aria-labelledby="viewTitle">
+          <div class="table-actions">
+            <button class="primary-btn" id="addNeedBtn" type="button">新增需求</button>
+            <button class="ghost-btn" id="downloadNeedTemplateBtn" type="button">下载上传模板</button>
+            <label class="ghost-btn file-btn">
+              批量上传需求
+              <input id="needBatchInput" type="file" accept=".csv,.xls,.html,text/csv,application/vnd.ms-excel">
+            </label>
+            <span id="needsSummary"></span>
+          </div>
+          <div class="table-wrap">
+            <table id="needsTable"></table>
+          </div>
+        </section>
+
+        <section class="view" id="roomsView" aria-labelledby="viewTitle">
+          <div class="table-actions">
+            <button class="primary-btn" id="addRoomBtn" type="button">新增房间</button>
+            <button class="ghost-btn" id="downloadRoomTemplateBtn" type="button">下载上传模板</button>
+            <label class="ghost-btn file-btn">
+              批量新增房间
+              <input id="roomBatchInput" type="file" accept=".csv,.xls,.html,text/csv,application/vnd.ms-excel">
+            </label>
+            <span id="roomsSummary"></span>
+          </div>
+          <div class="room-cards" id="roomCards"></div>
+        </section>
+
+        <section class="view" id="onsiteView" aria-labelledby="viewTitle">
+          <div class="filter-row">
+            <label>核对日期
+              <select id="onsiteDate"></select>
+            </label>
+            <label>酒店
+              <select id="onsiteHotel"></select>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table id="onsiteTable"></table>
+          </div>
+        </section>
+
+        <section class="view" id="changesView" aria-labelledby="viewTitle">
+          <div class="table-actions">
+            <button class="primary-btn" id="addChangeBtn" type="button">记录变更</button>
+            <span>换房、取消、延期、人数变化都先记在这里。</span>
+          </div>
+          <div class="table-wrap">
+            <table id="changesTable"></table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="editDialog">
+      <form method="dialog" class="dialog-card" id="dialogForm">
+        <h3 id="dialogTitle">编辑</h3>
+        <div id="dialogFields" class="dialog-fields"></div>
+        <div class="dialog-actions">
+          <button class="ghost-btn" value="cancel" type="button" id="dialogCancel">取消</button>
+          <button class="primary-btn" value="default" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
