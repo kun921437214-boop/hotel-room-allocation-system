@@ -218,6 +218,28 @@ button {
   color: var(--red);
 }
 
+.sync-status {
+  align-items: center;
+  background: var(--yellow-soft);
+  border-radius: 999px;
+  color: var(--yellow);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 30px;
+  padding: 5px 10px;
+}
+
+.sync-status.ok {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.sync-status.bad {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .file-btn input {
   display: none;
 }

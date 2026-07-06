@@ -1,0 +1,8 @@
+{
+  "name": "hotel-room-allocation-system",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check app.js && node --check api/state.js"
+  }
+}

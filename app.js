@@ -1,4 +1,5 @@
 const storageKey = "hotelRoomOpsLocalSystem.v5.roomAvailability";
+const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
 
 const sampleData = {
   hotels: [
@@ -16,6 +17,9 @@ const sampleData = {
 let state = loadState();
 let activeView = "dashboard";
 let editing = null;
+let remoteSyncReady = false;
+let saveTimer = null;
+let saveInFlight = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -68,6 +72,65 @@ function loadState() {
 
 function saveState() {
   localStorage.setItem(storageKey, JSON.stringify(state));
+  scheduleRemoteSave();
+}
+
+function setSyncStatus(message, type = "") {
+  const status = $("#syncStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.className = ["sync-status", type].filter(Boolean).join(" ");
+}
+
+function saveLocalStateOnly() {
+  localStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+async function loadRemoteState() {
+  setSyncStatus("正在连接共享数据");
+  try {
+    const response = await fetch(syncApiUrl, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload?.state) {
+      state = payload.state;
+      saveLocalStateOnly();
+    }
+    remoteSyncReady = true;
+    setSyncStatus("共享数据已同步", "ok");
+    return true;
+  } catch (error) {
+    remoteSyncReady = false;
+    setSyncStatus("本地模式，未连接共享数据", "bad");
+    return false;
+  }
+}
+
+function scheduleRemoteSave() {
+  if (!remoteSyncReady) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(syncStateToRemote, 450);
+}
+
+async function syncStateToRemote() {
+  if (!remoteSyncReady || saveInFlight) return;
+  saveInFlight = true;
+  setSyncStatus("正在保存共享数据");
+  try {
+    const response = await fetch(syncApiUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ state })
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    remoteSyncReady = true;
+    setSyncStatus("共享数据已保存", "ok");
+  } catch (error) {
+    remoteSyncReady = false;
+    setSyncStatus("保存失败，已保存在本机", "bad");
+  } finally {
+    saveInFlight = false;
+  }
 }
 
 function nextId(prefix, list) {
@@ -1246,5 +1309,11 @@ function bindEvents() {
   });
 }
 
-bindEvents();
-render();
+async function initializeApp() {
+  bindEvents();
+  render();
+  const loaded = await loadRemoteState();
+  if (loaded) render();
+}
+
+initializeApp();

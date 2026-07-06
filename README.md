@@ -1,6 +1,6 @@
 # 本地酒店房间分配系统
 
-这是一个参考 MRBS（Meeting Room Booking System）思路改造的活动酒店房间分配样机。它不是 PHP/MySQL 版本，而是纯本地静态 Web 应用，直接打开 `index.html` 即可使用。
+这是一个参考 MRBS（Meeting Room Booking System）思路改造的活动酒店房间分配样机。前端是静态页面，生产部署时通过 `/api/state` 接口把数据同步到飞书多维表格。
 
 ## 如何打开
 
@@ -8,7 +8,33 @@
 
 `index.html`
 
-系统数据保存在浏览器 `localStorage` 中。可以用页面右上角的“导出 JSON”和“导入 JSON”备份或恢复数据。
+如果直接打开本地文件，系统会使用浏览器本地数据。部署到支持 Node/Vercel Serverless API 的环境后，系统会优先连接飞书多维表格共享数据；页面右上角会显示同步状态。
+
+仍然可以用页面右上角的“导出 JSON”和“导入 JSON”备份或恢复数据。
+
+## 多人同步
+
+同步链路：
+
+`网页 -> /api/state -> 飞书 OpenAPI -> 飞书多维表格`
+
+飞书多维表格：
+
+- Base：`https://ucngneehl818.feishu.cn/base/Mg3abeaEya2QptsxOjIchxSLndd`
+- 同步表：`系统同步数据`
+- 记录键：`hotel-room-state-v1`
+
+后端环境变量参考 `.env.example`：
+
+- `FEISHU_APP_ID`
+- `FEISHU_APP_SECRET`
+- `FEISHU_BASE_URL`
+- `FEISHU_APP_TOKEN`
+- `FEISHU_SYNC_TABLE_ID`
+- `FEISHU_SYNC_TABLE_NAME`
+- `FEISHU_SYNC_RECORD_KEY`
+
+注意：`FEISHU_APP_SECRET` 不能写进 `app.js`、`index.html` 或 GitHub 公开仓库，只能配置在后端部署平台的环境变量里。
 
 ## 参考 MRBS 的地方
 
@@ -44,9 +70,7 @@
 
 ## 后续二开方向
 
-- 接入真实后端数据库，替代浏览器本地保存。
 - 增加用户权限：总协调、酒店对接、现场核对、只读查看。
-- 增加房间批量导入、需求批量导入。
 - 增加自动生成每日统计和 Excel 导出。
 - 增加拖拽式分房，把入住对象拖到空闲房晚格子里。
-- 接入飞书多维表格 API，同步库存、分配和现场核对。
+- 将当前整包 JSON 同步升级为按房间、需求、分房记录分表增量同步。
