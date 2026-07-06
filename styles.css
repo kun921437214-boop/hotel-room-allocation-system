@@ -975,8 +975,109 @@ dialog::backdrop {
 }
 
 @media (max-width: 640px) {
+  body {
+    overflow-x: hidden;
+  }
+
+  .app-shell {
+    display: block;
+  }
+
+  .sidebar {
+    gap: 12px;
+    height: auto;
+    padding: 14px 12px 12px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .brand {
+    gap: 10px;
+  }
+
+  .brand-mark {
+    height: 36px;
+    width: 36px;
+  }
+
+  .brand h1 {
+    font-size: 17px;
+  }
+
+  .brand p,
+  .sidebar-note {
+    display: none;
+  }
+
+  .nav {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 8px;
+    margin: 0 -2px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-item {
+    flex: 0 0 auto;
+    min-width: 82px;
+    padding: 9px 10px;
+    text-align: center;
+  }
+
   .main {
-    padding: 16px;
+    padding: 14px 12px 20px;
+  }
+
+  .topbar {
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .topbar h2 {
+    font-size: 26px;
+  }
+
+  .toolbar,
+  .table-actions,
+  .filter-row {
+    align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
+  .search,
+  .sync-status,
+  .table-actions > span,
+  .filter-row > .calendar-date-range {
+    grid-column: 1 / -1;
+  }
+
+  .search input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .primary-btn,
+  .ghost-btn,
+  .danger-btn,
+  label.file-btn {
+    min-height: 40px;
+    width: 100%;
+  }
+
+  label,
+  select,
+  input,
+  textarea {
+    width: 100%;
   }
 
   .kpi-grid,
@@ -985,16 +1086,113 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
 
-  .search input {
-    min-width: 120px;
+  .kpi {
+    min-height: 96px;
+    padding: 14px;
+  }
+
+  .kpi strong {
+    font-size: 26px;
+  }
+
+  .dashboard-grid {
+    gap: 12px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .panel-header {
+    margin-bottom: 12px;
+  }
+
+  .panel-header h3 {
+    font-size: 17px;
+  }
+
+  .calendar-date-range {
+    min-width: 0;
+  }
+
+  .legend {
+    gap: 6px;
+  }
+
+  .board {
+    border-radius: 8px;
+    margin: 0 -2px;
+  }
+
+  .board-grid {
+    min-width: 760px;
+  }
+
+  .board-cell {
+    min-height: 66px;
+    padding: 8px;
+  }
+
+  .split {
+    gap: 12px;
+  }
+
+  table {
+    min-width: 860px;
+  }
+
+  th,
+  td {
+    padding: 8px;
+  }
+
+  .room-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .room-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .dialog-card,
+  .dialog-card.room-dialog-card {
+    border-radius: 8px;
+    max-height: calc(100vh - 20px);
+    min-height: 0;
+    padding: 14px;
+    width: calc(100vw - 20px);
   }
 
   .date-range-body {
     grid-template-columns: 1fr;
   }
 
+  .date-range-panel {
+    bottom: 12px;
+    left: 12px;
+    max-height: calc(100vh - 24px);
+    position: fixed;
+    right: 12px;
+    top: auto;
+    width: auto;
+    z-index: 50;
+  }
+
+  .date-calendar {
+    padding: 10px;
+  }
+
+  .date-day {
+    height: 34px;
+  }
+
   .date-range-footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .dialog-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
   }
 }
