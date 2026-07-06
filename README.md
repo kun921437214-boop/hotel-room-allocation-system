@@ -22,7 +22,9 @@
 
 - Base：`https://ucngneehl818.feishu.cn/base/Mg3abeaEya2QptsxOjIchxSLndd`
 - 同步表：`系统同步数据`
+- 同步表 ID：`tblFP1unaKOU0CCR`
 - 记录键：`hotel-room-state-v1`
+- 同步表链接：`https://ucngneehl818.feishu.cn/base/Mg3abeaEya2QptsxOjIchxSLndd?table=tblFP1unaKOU0CCR`
 
 后端环境变量参考 `.env.example`：
 
@@ -35,6 +37,8 @@
 - `FEISHU_SYNC_RECORD_KEY`
 
 注意：`FEISHU_APP_SECRET` 不能写进 `app.js`、`index.html` 或 GitHub 公开仓库，只能配置在后端部署平台的环境变量里。
+
+当前已给默认协作者配置 `full_access` 管理权限。
 
 ## 参考 MRBS 的地方
 
