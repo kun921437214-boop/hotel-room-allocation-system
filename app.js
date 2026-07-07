@@ -545,8 +545,18 @@ function exportCurrentNeeds() {
       ]);
     });
   });
-  const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
-  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
+  const tableHtml = rows.map((row, rowIndex) => {
+    const tag = rowIndex === 0 ? "th" : "td";
+    return `<tr>${row.map((cell) => `<${tag}>${escapeHtml(cell)}</${tag}>`).join("")}</tr>`;
+  }).join("");
+  const styles = `
+    <style>
+      table { border-collapse: collapse; font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 12pt; }
+      th, td { border: 1px solid #333; padding: 8px 10px; text-align: center; vertical-align: middle; mso-number-format: "\\@"; }
+      th { background: #f2f4f7; font-weight: 700; }
+    </style>
+  `;
+  const html = `<!doctype html><html><head><meta charset="utf-8">${styles}</head><body><table>${tableHtml}</table></body></html>`;
   downloadBlob(`入住需求当前名单-${dateToValue(new Date())}.xls`, html, "application/vnd.ms-excel;charset=utf-8");
 }
 
