@@ -557,6 +557,81 @@ function downloadStyledTable(filename, rows) {
   downloadBlob(filename, html, "application/vnd.ms-excel;charset=utf-8");
 }
 
+function worksheetName(name, usedNames) {
+  const base = String(name || "工作表").replace(/[\\/:?*\[\]]/g, " ").slice(0, 31).trim() || "工作表";
+  let candidate = base;
+  let index = 2;
+  while (usedNames.has(candidate)) {
+    const suffix = `-${index}`;
+    candidate = `${base.slice(0, 31 - suffix.length)}${suffix}`;
+    index += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function workbookCellXml(cell, rowIndex) {
+  const isCellObject = typeof cell === "object" && cell !== null;
+  const isHeader = rowIndex === 0 || (isCellObject && cell.header);
+  const value = isCellObject ? cell.value : cell;
+  const attributes = [
+    isCellObject && cell.index ? `ss:Index="${Number(cell.index)}"` : "",
+    isCellObject && cell.colspan ? `ss:MergeAcross="${Number(cell.colspan) - 1}"` : "",
+    isCellObject && cell.rowspan ? `ss:MergeDown="${Number(cell.rowspan) - 1}"` : "",
+    `ss:StyleID="${isHeader ? "Header" : "Cell"}"`
+  ].filter(Boolean).join(" ");
+  return `<Cell ${attributes}><Data ss:Type="String">${escapeHtml(value)}</Data></Cell>`;
+}
+
+function downloadStyledWorkbook(filename, sheets) {
+  const usedNames = new Set();
+  const worksheetXml = sheets.map((sheet) => {
+    const rows = sheet.rows.map((row, rowIndex) => (
+      `<Row>${row.map((cell) => workbookCellXml(cell, rowIndex)).join("")}</Row>`
+    )).join("");
+    return `
+      <Worksheet ss:Name="${escapeHtml(worksheetName(sheet.name, usedNames))}">
+        <Table>${rows}</Table>
+      </Worksheet>
+    `;
+  }).join("");
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+    <?mso-application progid="Excel.Sheet"?>
+    <Workbook
+      xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:x="urn:schemas-microsoft-com:office:excel"
+      xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:html="http://www.w3.org/TR/REC-html40">
+      <Styles>
+        <Style ss:ID="Cell">
+          <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+          <Borders>
+            <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+          </Borders>
+          <NumberFormat ss:Format="@"/>
+        </Style>
+        <Style ss:ID="Header">
+          <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+          <Borders>
+            <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+          </Borders>
+          <Font ss:Bold="1"/>
+          <Interior ss:Color="#F2F4F7" ss:Pattern="Solid"/>
+          <NumberFormat ss:Format="@"/>
+        </Style>
+      </Styles>
+      ${worksheetXml}
+    </Workbook>`;
+  downloadBlob(filename, xml, "application/vnd.ms-excel;charset=utf-8");
+}
+
 function exportCurrentNeeds() {
   const needs = currentFilteredNeeds();
   if (!needs.length) {
@@ -605,7 +680,11 @@ function statsExportHeaderRows(firstColumnLabel, dates, roomTypes) {
       { value: firstColumnLabel, rowspan: 2, header: true },
       ...dates.map((date) => ({ value: date, colspan: roomTypes.length, header: true }))
     ],
-    dates.flatMap(() => roomTypes.map((type) => ({ value: type, header: true })))
+    dates.flatMap((date, dateIndex) => roomTypes.map((type, typeIndex) => ({
+      value: type,
+      header: true,
+      index: dateIndex === 0 && typeIndex === 0 ? 2 : undefined
+    })))
   ];
 }
 
@@ -616,6 +695,19 @@ function statsExportCells(needs, roomTypes) {
   return roomTypes.map((type) => (counts[type] ? `${counts[type]}间` : ""));
 }
 
+function buildStatsExportRows(firstColumnLabel, labels, dates, getNeeds) {
+  const data = labels.map((label) => ({
+    label,
+    byDate: dates.map((date) => getNeeds(label, date))
+  }));
+  const roomTypes = statsExportRoomTypes(data.flatMap((row) => row.byDate));
+  const rows = statsExportHeaderRows(firstColumnLabel, dates, roomTypes);
+  data.forEach((row) => {
+    rows.push([row.label, ...row.byDate.flatMap((needs) => statsExportCells(needs, roomTypes))]);
+  });
+  return rows;
+}
+
 function exportHotelStats() {
   const selectedIdentity = $("#calendarIdentity").value || "all";
   const dates = dateRangeValues("#calendarStartInput", "#calendarEndInput", activeDates()[0] || defaultDate(), activeDates()[0] || defaultDate());
@@ -624,16 +716,21 @@ function exportHotelStats() {
     alert("当前筛选条件下没有可导出的酒店统计。");
     return;
   }
-  const data = hotels.map((hotel) => ({
-    label: hotel,
-    byDate: dates.map((date) => needStaysOnDate(date, hotel, selectedIdentity))
-  }));
-  const roomTypes = statsExportRoomTypes(data.flatMap((row) => row.byDate));
-  const rows = statsExportHeaderRows("酒店", dates, roomTypes);
-  data.forEach((row) => {
-    rows.push([row.label, ...row.byDate.flatMap((needs) => statsExportCells(needs, roomTypes))]);
-  });
-  downloadStyledTable(`酒店统计当前信息-${dateToValue(new Date())}.xls`, rows);
+  const sheets = [
+    {
+      name: selectedIdentity === "all" ? "全部" : selectedIdentity,
+      rows: buildStatsExportRows("酒店", hotels, dates, (hotel, date) => needStaysOnDate(date, hotel, selectedIdentity))
+    }
+  ];
+  if (selectedIdentity === "all") {
+    roleIdentities().forEach((identity) => {
+      sheets.push({
+        name: identity,
+        rows: buildStatsExportRows("酒店", hotels, dates, (hotel, date) => needStaysOnDate(date, hotel, identity))
+      });
+    });
+  }
+  downloadStyledWorkbook(`酒店统计当前信息-${dateToValue(new Date())}.xls`, sheets);
 }
 
 function exportRoleStats() {
@@ -644,16 +741,21 @@ function exportRoleStats() {
     alert("当前筛选条件下没有可导出的角色统计。");
     return;
   }
-  const data = identities.map((identity) => ({
-    label: identity,
-    byDate: dates.map((date) => roleNeedsOnDate(date, identity, selectedHotel))
-  }));
-  const roomTypes = statsExportRoomTypes(data.flatMap((row) => row.byDate));
-  const rows = statsExportHeaderRows("人员性质", dates, roomTypes);
-  data.forEach((row) => {
-    rows.push([row.label, ...row.byDate.flatMap((needs) => statsExportCells(needs, roomTypes))]);
-  });
-  downloadStyledTable(`角色统计当前信息-${dateToValue(new Date())}.xls`, rows);
+  const sheets = [
+    {
+      name: selectedHotel === "all" ? "全部" : selectedHotel,
+      rows: buildStatsExportRows("人员性质", identities, dates, (identity, date) => roleNeedsOnDate(date, identity, selectedHotel))
+    }
+  ];
+  if (selectedHotel === "all") {
+    needHotels().forEach((hotel) => {
+      sheets.push({
+        name: hotel,
+        rows: buildStatsExportRows("人员性质", identities, dates, (identity, date) => roleNeedsOnDate(date, identity, hotel))
+      });
+    });
+  }
+  downloadStyledWorkbook(`角色统计当前信息-${dateToValue(new Date())}.xls`, sheets);
 }
 
 function parseCsv(text) {
