@@ -311,8 +311,13 @@ module.exports = async function handler(req, res) {
     } else {
       await createSyncRecord(tableId, body.state);
     }
-    await syncReadableMirrorTables(body.state);
-    return json(res, 200, { ok: true, tableId });
+    let mirrorError = "";
+    try {
+      await syncReadableMirrorTables(body.state);
+    } catch (error) {
+      mirrorError = error.message || "飞书查看表同步失败";
+    }
+    return json(res, 200, { ok: true, tableId, mirrorError });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "同步失败" });
   }
