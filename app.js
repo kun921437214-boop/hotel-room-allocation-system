@@ -1210,7 +1210,8 @@ function renderNeeds() {
       phoneList: peopleFieldCell(need, "phone"),
       idNoList: peopleFieldCell(need, "idNo"),
       identityList: peopleFieldCell(need, "identity"),
-      stayTime: stayTimeCell(need)
+      stayTime: stayTimeCell(need),
+      stayDays: `${needNightCount(need)}天`
     }));
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，未分配 ${rows.filter((item) => item.status === "未分配").length} 条`;
   $("#needsTable").innerHTML = table([
@@ -1221,9 +1222,10 @@ function renderNeeds() {
     { key: "idNoList", label: "身份证号", html: true },
     { key: "identityList", label: "人员性质", html: true },
     { key: "stayTime", label: "入住时间", html: true },
+    { key: "stayDays", label: "入住天数" },
     { key: "hotel", label: "安排酒店" },
-    { key: "roomType", label: "房间类型" },
     { key: "roomNo", label: "房间号" },
+    { key: "roomType", label: "房间类型" },
     { key: "note", label: "备注" }
   ], rows, (row) => `
     <button class="mini-btn" data-edit-need="${row.id}">编辑</button>
@@ -1453,8 +1455,8 @@ function needFields() {
     { key: "status", type: "hidden", default: "未分配" },
     { key: "companions", type: "peopleRepeater" },
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
-    { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
     { key: "roomNo", label: "房间号" },
+    { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
     { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
     { key: "note", label: "备注", type: "textarea" }
   ];
