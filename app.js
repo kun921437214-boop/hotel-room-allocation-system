@@ -31,6 +31,8 @@ function defaultDate(offset = 0) {
 }
 
 function activeDates() {
+  const needDates = Array.from(new Set(state.needs.flatMap((need) => nightsBetween(need.checkIn, need.checkOut)))).sort();
+  if (needDates.length) return needDates;
   const roomDates = Array.from(new Set(state.rooms.flatMap((room) => roomAvailableDates(room)))).sort();
   if (roomDates.length) return roomDates;
   return state.eventDates.length ? state.eventDates : [defaultDate()];
@@ -142,6 +144,62 @@ function nextId(prefix, list) {
 
 function hotelName(id) {
   return state.hotels.find((hotel) => hotel.id === id || hotel.name === id)?.name || id || "未知酒店";
+}
+
+function normalizedNeedHotel(hotel) {
+  if (hotel === "汉庭酒店") return "汉庭";
+  if (hotel === "如家酒店") return "如家";
+  if (hotel === "万豪酒店") return "万豪";
+  return hotel || "";
+}
+
+function needHotels() {
+  const names = new Set([...arrangementHotelOptions, ...state.needs.map((need) => normalizedNeedHotel(need.hotel)).filter(Boolean)]);
+  return Array.from(names);
+}
+
+function needStaysOnDate(date, hotel = "all") {
+  return state.needs.filter((need) => (
+    need.status !== "已取消" &&
+    need.checkIn &&
+    need.checkOut &&
+    date >= need.checkIn &&
+    date < need.checkOut &&
+    (hotel === "all" || normalizedNeedHotel(need.hotel) === hotel) &&
+    filteredText(need).includes(getSearch())
+  ));
+}
+
+function needTypeCounts(needs) {
+  return needs.reduce((counts, need) => {
+    const type = normalizedRoomType(need.roomType);
+    counts[type] = (counts[type] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function normalizedRoomType(type) {
+  if (type === "双床房" || type === "双标间") return "双标";
+  if (type === "大床房") return "大床";
+  return type || "未填";
+}
+
+function typeCountText(needs) {
+  const counts = needTypeCounts(needs);
+  return Object.entries(counts).map(([type, count]) => `${type}${count}`).join(" / ") || "无需求";
+}
+
+function roomTypeCountText(needs) {
+  const counts = needTypeCounts(needs);
+  return roomTypeOptions.map((type) => `${type}${counts[type] || 0}`).join(" / ");
+}
+
+function hotelRoomCountOnDate(date, hotel) {
+  return needStaysOnDate(date, hotel).length;
+}
+
+function needNightCount(need) {
+  return nightsBetween(need.checkIn, need.checkOut).length;
 }
 
 function roomLabel(roomId) {
@@ -576,20 +634,19 @@ function setView(view) {
 }
 
 function kpiData() {
-  const nights = state.rooms.reduce((sum, room) => sum + roomAvailableDates(room).length, 0);
-  const occupiedNights = state.bookings.reduce((sum, booking) => sum + nightsBetween(booking.checkIn, booking.checkOut).length, 0);
-  const checkedIn = state.bookings.filter((booking) => booking.checkedIn === "是").length;
+  const nights = state.needs.reduce((sum, need) => sum + needNightCount(need), 0);
+  const assignedNights = state.needs.filter((need) => need.hotel).reduce((sum, need) => sum + needNightCount(need), 0);
+  const people = state.needs.reduce((sum, need) => sum + (Number(need.people) || 1), 0);
   const unassigned = state.needs.filter((need) => need.status === "未分配").length;
-  const unconfirmed = state.bookings.filter((booking) => booking.confirmed === "否").length;
+  const assigned = state.needs.filter((need) => need.hotel).length;
   const pendingChanges = state.changes.filter((change) => change.hotelSynced === "否" || change.guestSynced === "否").length;
-  const free = nights - occupiedNights;
   return [
-    ["总房晚", nights, "按房间可用日期范围计算"],
-    ["已占用房晚", occupiedNights, "分配记录覆盖的夜晚"],
-    ["可用房晚", free, "仍可安排的房晚"],
-    ["已入住记录", checkedIn, "现场到店确认"],
+    ["总需求房晚", nights, "按入住需求日期计算"],
+    ["已安排房晚", assignedNights, "已选择酒店的需求房晚"],
+    ["总人数", people, "主人员和增加人员合计"],
+    ["已安排需求", assigned, "已指定酒店"],
     ["未分配需求", unassigned, "需要继续处理"],
-    ["待确认分配", unconfirmed + pendingChanges, "含未确认和待同步"]
+    ["待处理事项", pendingChanges, "含待同步变更"]
   ];
 }
 
@@ -605,27 +662,24 @@ function renderKpis() {
 
 function renderHeatmap() {
   const dates = activeDates();
-  if (!state.hotels.length) {
+  const hotels = needHotels();
+  if (!state.needs.length) {
     $("#heatmap").style.gridTemplateColumns = "1fr";
     $("#heatmap").innerHTML = `<div class="heat-cell header">暂无酒店住宿数据，请先维护入住需求。</div>`;
     return;
   }
   const header = [`<div class="heat-cell header sticky-col">酒店</div>`, ...dates.map((date) => `<div class="heat-cell header">${date.slice(5)}</div>`)];
-  const rows = state.hotels.flatMap((hotel) => {
-    const hotelRooms = state.rooms.filter((room) => (room.hotel || room.hotelId) === hotel.name || (room.hotel || room.hotelId) === hotel.id);
+  const rows = hotels.flatMap((hotel) => {
     return [
-      `<div class="heat-cell hotel-name sticky-col">${hotel.name}<small>${hotelRooms.length} 间房</small></div>`,
+      `<div class="heat-cell hotel-name sticky-col">${hotel}<small>入住需求</small></div>`,
       ...dates.map((date) => {
-        const availableRooms = hotelRooms.filter((room) => isRoomAvailableOn(room, date));
-        const occupied = availableRooms.filter((room) => bookingFor(room.id, date)).length;
-        const abnormal = availableRooms.filter((room) => bookingFor(room.id, date)?.status === "异常").length;
-        const free = availableRooms.length - occupied;
-        const className = abnormal ? "status-red" : free === 0 ? "status-red" : free === 1 ? "status-yellow" : "status-green";
-        return `<div class="heat-cell ${className}"><strong>${free}</strong><small>剩余 / 已用 ${occupied}</small></div>`;
+        const needs = needStaysOnDate(date, hotel);
+        const className = needs.length >= 5 ? "status-red" : needs.length > 0 ? "status-yellow" : "status-green";
+        return `<div class="heat-cell ${className}"><strong>${hotelRoomCountOnDate(date, hotel)} 间</strong><small>${roomTypeCountText(needs)}</small></div>`;
       })
     ];
   });
-  $("#heatmap").style.gridTemplateColumns = `150px repeat(${dates.length}, 132px)`;
+  $("#heatmap").style.gridTemplateColumns = `150px repeat(${dates.length}, 168px)`;
   $("#heatmap").innerHTML = [...header, ...rows].join("");
 }
 
@@ -669,7 +723,7 @@ function renderUseBars() {
 }
 
 function populateFilters() {
-  const hotelOptions = [`<option value="all">全部酒店</option>`, ...state.hotels.map((hotel) => `<option value="${hotel.name}">${hotel.name}</option>`)].join("");
+  const hotelOptions = [`<option value="all">全部酒店</option>`, ...needHotels().map((hotel) => `<option value="${hotel}">${hotel}</option>`)].join("");
   const dateOptions = activeDates().map((date) => `<option value="${date}">${date}</option>`).join("");
   $("#calendarHotel").innerHTML = hotelOptions;
   $("#onsiteHotel").innerHTML = hotelOptions;
@@ -686,43 +740,32 @@ function renderCalendar() {
   const checkIn = $("#calendarStartInput").value || activeDates()[0] || defaultDate();
   const checkOut = $("#calendarEndInput").value || checkIn;
   const dates = checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
-  const rooms = state.rooms
-    .filter((room) => selectedHotel === "all" || (room.hotel || room.hotelId) === selectedHotel)
-    .filter((room) => filteredText({ ...room, hotel: hotelName(room.hotel || room.hotelId) }).includes(getSearch()));
+  const hotels = needHotels().filter((hotel) => selectedHotel === "all" || hotel === selectedHotel);
   if (!dates.length) {
     $("#roomBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
     return;
   }
-  if (!rooms.length) {
-    $("#roomBoard").innerHTML = `<div class="board-cell header">当前筛选条件下暂无房间。</div>`;
+  if (!hotels.length || !state.needs.length) {
+    $("#roomBoard").innerHTML = `<div class="board-cell header">当前筛选条件下暂无入住需求。</div>`;
     return;
   }
-  const header = [`<div class="board-cell header">房间</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
-  const rows = rooms.flatMap((room) => [
-    `<div class="board-cell room-name">${hotelName(room.hotel || room.hotelId)}<small>${room.roomNo}｜${room.type}｜${room.capacity}人</small></div>`,
+  const header = [`<div class="board-cell header">酒店</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
+  const rows = hotels.flatMap((hotel) => [
+    `<div class="board-cell room-name">${hotel}<small>按入住需求统计</small></div>`,
     ...dates.map((date) => {
-      if (!isRoomAvailableOn(room, date)) {
-        return `
-          <div class="board-cell">
-            <span class="pill pill-reserved">不可用</span>
-            <strong>不在可用日期内</strong>
-            <small>${room.availableFrom || "未设"} 至 ${room.availableTo || "未设"}</small>
-          </div>
-        `;
-      }
-      const booking = bookingFor(room.id, date);
-      const status = roomStatus(room.id, date);
-      const need = booking ? needById(booking.needId) : null;
+      const needs = needStaysOnDate(date, hotel);
+      const pillClass = needs.length ? "pill-assigned" : "pill-free";
+      const pillText = needs.length ? `${needs.length} 间` : "0 间";
       return `
         <div class="board-cell">
-          <span class="pill ${status.className}">${status.label}</span>
-          <strong>${need ? need.name : "可安排"}</strong>
-          <small>${booking ? `${booking.purpose}｜${booking.people}人` : `${room.type}｜${room.capacity}人`}</small>
+          <span class="pill ${pillClass}">${pillText}</span>
+          <strong>${roomTypeCountText(needs)}</strong>
+          <small>${needs.length ? needs.map((need) => need.name).join("、") : "暂无安排"}</small>
         </div>
       `;
     })
   ]);
-  $("#roomBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 210px repeat(${dates.length}, minmax(138px, 1fr))">${[...header, ...rows].join("")}</div>`;
+  $("#roomBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 210px repeat(${dates.length}, minmax(168px, 1fr))">${[...header, ...rows].join("")}</div>`;
 }
 
 function populateAssignmentForm() {
