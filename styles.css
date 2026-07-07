@@ -607,6 +607,11 @@ textarea {
 }
 
 .room-type-other {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+.room-type-empty {
   background: var(--gray-soft);
   color: var(--muted);
 }

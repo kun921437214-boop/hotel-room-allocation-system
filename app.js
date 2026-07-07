@@ -204,7 +204,9 @@ function roomTypeCountClass(type) {
 function roomTypeCountLines(needs) {
   const counts = needTypeCounts(needs);
   const extraTypes = Object.keys(counts).filter((type) => !roomTypeOptions.includes(type));
-  return [...roomTypeOptions, ...extraTypes].map((type) => (
+  const visibleTypes = [...roomTypeOptions, ...extraTypes].filter((type) => (counts[type] || 0) > 0);
+  if (!visibleTypes.length) return `<div class="room-type-count-line room-type-empty">暂无</div>`;
+  return visibleTypes.map((type) => (
     `<div class="room-type-count-line ${roomTypeCountClass(type)}">${escapeHtml(type)}：${counts[type] || 0}间</div>`
   )).join("");
 }
