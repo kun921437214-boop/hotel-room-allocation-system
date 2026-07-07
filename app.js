@@ -1140,9 +1140,9 @@ function needFields() {
     { key: "identity", label: "人员性质", type: "select", options: identityOptions },
     { key: "people", type: "hidden", default: 1 },
     { key: "status", type: "hidden", default: "未分配" },
+    { key: "companions", type: "peopleRepeater" },
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
     { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
-    { key: "companions", type: "peopleRepeater" },
     { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
     { key: "note", label: "备注", type: "textarea" }
   ];
