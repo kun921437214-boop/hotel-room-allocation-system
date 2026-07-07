@@ -158,6 +158,18 @@ function needHotels() {
   return Array.from(names);
 }
 
+function personIdentity(person, fallback = "") {
+  return person?.identity || fallback || "其他";
+}
+
+function roleIdentities() {
+  const names = new Set(identityOptions);
+  state.needs.forEach((need) => {
+    peopleForNeed(need).forEach((person) => names.add(personIdentity(person, need.identity)));
+  });
+  return Array.from(names).filter(Boolean);
+}
+
 function needStaysOnDate(date, hotel = "all") {
   return state.needs.filter((need) => (
     need.status !== "已取消" &&
@@ -166,6 +178,18 @@ function needStaysOnDate(date, hotel = "all") {
     date >= need.checkIn &&
     date < need.checkOut &&
     (hotel === "all" || normalizedNeedHotel(need.hotel) === hotel) &&
+    filteredText(need).includes(getSearch())
+  ));
+}
+
+function roleNeedsOnDate(date, identity = "all") {
+  return state.needs.filter((need) => (
+    need.status !== "已取消" &&
+    need.checkIn &&
+    need.checkOut &&
+    date >= need.checkIn &&
+    date < need.checkOut &&
+    (identity === "all" || peopleForNeed(need).some((person) => personIdentity(person, need.identity) === identity)) &&
     filteredText(need).includes(getSearch())
   ));
 }
@@ -642,7 +666,8 @@ function setView(view) {
   targetView.classList.add("active");
   const titles = {
     dashboard: "总览",
-    calendar: "酒店信息",
+    calendar: "酒店统计",
+    roleStats: "角色统计",
     needs: "入住需求",
     onsite: "现场核对",
     changes: "变更记录"
@@ -742,14 +767,19 @@ function renderUseBars() {
 
 function populateFilters() {
   const hotelOptions = [`<option value="all">全部酒店</option>`, ...needHotels().map((hotel) => `<option value="${hotel}">${hotel}</option>`)].join("");
+  const roleOptions = [`<option value="all">全部人员性质</option>`, ...roleIdentities().map((identity) => `<option value="${identity}">${identity}</option>`)].join("");
   const dateOptions = activeDates().map((date) => `<option value="${date}">${date}</option>`).join("");
   $("#calendarHotel").innerHTML = hotelOptions;
+  $("#roleIdentity").innerHTML = roleOptions;
   $("#onsiteHotel").innerHTML = hotelOptions;
   $("#onsiteDate").innerHTML = dateOptions;
   const dates = activeDates();
   if (!$("#calendarStartInput").value) $("#calendarStartInput").value = defaultHotelInfoRange.start;
   if (!$("#calendarEndInput").value) $("#calendarEndInput").value = defaultHotelInfoRange.end;
   refreshCalendarDateRange();
+  if (!$("#roleStartInput").value) $("#roleStartInput").value = defaultHotelInfoRange.start;
+  if (!$("#roleEndInput").value) $("#roleEndInput").value = defaultHotelInfoRange.end;
+  refreshDateRangePicker(document.querySelector("[data-role-range]"));
   if (!$("#onsiteDate").value) $("#onsiteDate").value = activeDates()[0];
 }
 
@@ -780,6 +810,35 @@ function renderCalendar() {
     })
   ]);
   $("#roomBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 136px repeat(${dates.length}, minmax(124px, 1fr))">${[...header, ...rows].join("")}</div>`;
+}
+
+function renderRoleStats() {
+  const selectedIdentity = $("#roleIdentity").value || "all";
+  const checkIn = $("#roleStartInput").value || defaultHotelInfoRange.start;
+  const checkOut = $("#roleEndInput").value || defaultHotelInfoRange.end;
+  const dates = checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
+  const identities = roleIdentities().filter((identity) => selectedIdentity === "all" || identity === selectedIdentity);
+  if (!dates.length) {
+    $("#roleStatsBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
+    return;
+  }
+  if (!identities.length || !state.needs.length) {
+    $("#roleStatsBoard").innerHTML = `<div class="board-cell header">当前筛选条件下暂无入住需求。</div>`;
+    return;
+  }
+  const header = [`<div class="board-cell header">人员性质</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
+  const rows = identities.flatMap((identity) => [
+    `<div class="board-cell room-name">${identity}<small>按人员性质统计</small></div>`,
+    ...dates.map((date) => {
+      const needs = roleNeedsOnDate(date, identity);
+      return `
+        <div class="board-cell hotel-info-cell">
+          <div class="room-type-counts">${roomTypeCountLines(needs)}</div>
+        </div>
+      `;
+    })
+  ]);
+  $("#roleStatsBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 136px repeat(${dates.length}, minmax(124px, 1fr))">${[...header, ...rows].join("")}</div>`;
 }
 
 function populateAssignmentForm() {
@@ -1082,6 +1141,7 @@ function render() {
     renderUseBars();
   }
   if (activeView === "calendar") renderCalendar();
+  if (activeView === "roleStats") renderRoleStats();
   if (activeView === "needs") renderNeeds();
   if (activeView === "onsite") renderOnsite();
   if (activeView === "changes") renderChanges();
@@ -1263,6 +1323,7 @@ function bindEvents() {
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.view)));
   $("#searchInput").addEventListener("input", render);
   $("#calendarHotel").addEventListener("change", renderCalendar);
+  $("#roleIdentity").addEventListener("change", renderRoleStats);
   $("#onsiteDate").addEventListener("change", renderOnsite);
   $("#onsiteHotel").addEventListener("change", renderOnsite);
 
@@ -1420,6 +1481,7 @@ function bindEvents() {
       picker.querySelector("[data-range-panel]").hidden = true;
       if (picker.matches("[data-assignment-range]")) updateRoomOptions();
       if (picker.matches("[data-calendar-range]")) renderCalendar();
+      if (picker.matches("[data-role-range]")) renderRoleStats();
       return;
     }
     if (addCompanionBtn) {
