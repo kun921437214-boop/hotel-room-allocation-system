@@ -335,10 +335,11 @@ function assignmentPurposeForNeed(need) {
 }
 
 const roomBatchHeaders = ["酒店", "房间号", "楼层", "房型", "可住人数", "可用开始日期", "可用结束日期", "默认用途"];
-const roomTypeOptions = ["大床房", "双床房", "三人间", "家庭房", "套房", "其他"];
+const roomTypeOptions = ["双标", "大床", "套房"];
 const roomUseOptions = ["未分配", "自己人", "工作人员", "导师", "嘉宾", "选手家庭", "合作方", "备用", "其他"];
 const needBatchHeaders = ["姓名/团队名称", "身份类型", "联系方式", "人数", "入住日期", "离店日期", "期望房型", "分配状态", "负责人", "备注"];
-const identityOptions = ["工作人员", "导师", "嘉宾", "选手家庭", "合作方", "领导", "志愿者", "其他"];
+const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长"];
+const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
 const needStatusOptions = ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"];
 
 function escapeHtml(value) {
@@ -896,15 +897,17 @@ function renderNeeds() {
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，未分配 ${rows.filter((item) => item.status === "未分配").length} 条`;
   $("#needsTable").innerHTML = table([
     { key: "id", label: "需求ID" },
-    { key: "name", label: "姓名/团队" },
-    { key: "identity", label: "身份" },
-    { key: "people", label: "人数" },
+    { key: "name", label: "姓名" },
+    { key: "gender", label: "性别" },
+    { key: "phone", label: "电话" },
+    { key: "idNo", label: "身份证号" },
+    { key: "identity", label: "人员性质" },
     { key: "checkIn", label: "入住" },
     { key: "checkOut", label: "离店" },
+    { key: "hotel", label: "安排酒店" },
+    { key: "roomType", label: "房间类型" },
     { key: "assignedRoomTime", label: "已分配房间/时间", html: true },
-    { key: "roomType", label: "期望房型" },
     { key: "status", label: "状态", pill: true },
-    { key: "owner", label: "负责人" },
     { key: "note", label: "备注" }
   ], rows, (row) => `<button class="mini-btn" data-edit-need="${row.id}">编辑</button>`);
 }
@@ -995,6 +998,13 @@ function openDialog(title, fields, initial, onSave) {
   $("#dialogForm").classList.toggle("room-dialog-card", fields.some((field) => field.largeDialog));
   $("#dialogTitle").textContent = title;
   $("#dialogFields").innerHTML = fields.map((field) => {
+    if (field.type === "section") {
+      return `<div class="dialog-section-title">${field.label}</div>`;
+    }
+    if (field.type === "hidden") {
+      const value = initial[field.key] ?? field.default ?? "";
+      return `<input name="${field.key}" type="hidden" value="${value}">`;
+    }
     const full = field.type === "textarea" || field.type === "dateRange" ? " full" : "";
     const value = initial[field.key] ?? field.default ?? "";
     if (field.type === "dateRange") {
@@ -1038,7 +1048,7 @@ function openDialog(title, fields, initial, onSave) {
       `;
     }
     if (field.type === "select") {
-      return `<label class="${full}">${field.label}<select name="${field.key}">${field.options.map((option) => `<option ${option === value ? "selected" : ""}>${option}</option>`).join("")}</select></label>`;
+      return `<label class="${full}">${field.label}<select name="${field.key}">${field.options.map((option) => `<option value="${escapeHtml(option)}" ${option === value ? "selected" : ""}>${option || "未安排"}</option>`).join("")}</select></label>`;
     }
     if (field.type === "textarea") {
       return `<label class="${full}">${field.label}<textarea name="${field.key}" rows="3">${value}</textarea></label>`;
@@ -1056,16 +1066,31 @@ function dialogValues() {
   return data;
 }
 
+function normalizeNeedValues(values) {
+  const people = Number(values.people) || 1;
+  return {
+    ...values,
+    people,
+    adults: people,
+    status: values.hotel ? "已分配" : "未分配"
+  };
+}
+
 function needFields() {
   return [
-    { key: "name", label: "姓名/团队名称" },
-    { key: "identity", label: "身份类型", type: "select", options: ["工作人员", "导师", "嘉宾", "选手家庭", "合作方", "领导", "志愿者", "其他"] },
-    { key: "phone", label: "联系方式" },
-    { key: "people", label: "人数", type: "number" },
-    { label: "入住时间", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
-    { key: "roomType", label: "期望房型", type: "select", options: ["大床房", "双床房", "三人间", "家庭房", "套房", "其他"] },
-    { key: "status", label: "分配状态", type: "select", options: ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"] },
-    { key: "owner", label: "负责人" },
+    { label: "人员信息", type: "section" },
+    { key: "name", label: "姓名" },
+    { key: "gender", label: "性别", type: "select", options: ["男", "女"] },
+    { key: "phone", label: "电话" },
+    { key: "idNo", label: "身份证号" },
+    { key: "identity", label: "人员性质", type: "select", options: identityOptions },
+    { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
+    { key: "people", type: "hidden", default: 1 },
+    { key: "status", type: "hidden", default: "未分配" },
+    { label: "酒店信息", type: "section" },
+    { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
+    { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
+    { label: "备注", type: "section" },
     { key: "note", label: "备注", type: "textarea" }
   ];
 }
@@ -1148,11 +1173,14 @@ function bindEvents() {
     openDialog("新增入住需求", needFields(), {
       id: nextId("REQ-", state.needs),
       people: 1,
+      gender: "男",
       checkIn: activeDates()[0],
       checkOut: activeDates()[1] || defaultDate(1),
+      identity: "工作人员",
+      roomType: "双标",
       status: "未分配"
     }, (values) => {
-      state.needs.push({ id: nextId("REQ-", state.needs), adults: Number(values.people) || 1, children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...values, people: Number(values.people) || 1 });
+      state.needs.push({ id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) });
       addDatesToEventRange(nightsBetween(values.checkIn, values.checkOut));
     });
   });
@@ -1272,7 +1300,7 @@ function bindEvents() {
     }
     if (needBtn) {
       const need = needById(needBtn.dataset.editNeed);
-      openDialog("编辑入住需求", needFields(), need, (values) => Object.assign(need, values, { people: Number(values.people) || 1 }));
+      openDialog("编辑入住需求", needFields(), need, (values) => Object.assign(need, normalizeNeedValues(values)));
     }
     if (roomBtn) {
       const room = roomById(roomBtn.dataset.editRoom);
