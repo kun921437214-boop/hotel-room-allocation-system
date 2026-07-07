@@ -566,6 +566,24 @@ textarea {
   color: var(--muted);
 }
 
+.hotel-info-cell {
+  align-content: center;
+}
+
+.room-type-counts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.room-type-count-line {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
 .split {
   display: grid;
   grid-template-columns: minmax(360px, 0.85fr) minmax(0, 1.15fr);

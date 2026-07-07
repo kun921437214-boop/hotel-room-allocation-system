@@ -194,6 +194,11 @@ function roomTypeCountText(needs) {
   return roomTypeOptions.map((type) => `${type}${counts[type] || 0}`).join(" / ");
 }
 
+function roomTypeCountLines(needs) {
+  const counts = needTypeCounts(needs);
+  return roomTypeOptions.map((type) => `<div class="room-type-count-line">${type}：${counts[type] || 0}间</div>`).join("");
+}
+
 function hotelRoomCountOnDate(date, hotel) {
   return needStaysOnDate(date, hotel).length;
 }
@@ -624,7 +629,7 @@ function setView(view) {
   targetView.classList.add("active");
   const titles = {
     dashboard: "总览",
-    calendar: "房晚日历",
+    calendar: "酒店信息",
     needs: "入住需求",
     onsite: "现场核对",
     changes: "变更记录"
@@ -754,13 +759,9 @@ function renderCalendar() {
     `<div class="board-cell room-name">${hotel}<small>按入住需求统计</small></div>`,
     ...dates.map((date) => {
       const needs = needStaysOnDate(date, hotel);
-      const pillClass = needs.length ? "pill-assigned" : "pill-free";
-      const pillText = needs.length ? `${needs.length} 间` : "0 间";
       return `
-        <div class="board-cell">
-          <span class="pill ${pillClass}">${pillText}</span>
-          <strong>${roomTypeCountText(needs)}</strong>
-          <small>${needs.length ? needs.map((need) => need.name).join("、") : "暂无安排"}</small>
+        <div class="board-cell hotel-info-cell">
+          <div class="room-type-counts">${roomTypeCountLines(needs)}</div>
         </div>
       `;
     })
