@@ -750,17 +750,6 @@ dialog::backdrop {
   grid-column: 1 / -1;
 }
 
-.dialog-section-title {
-  background: #f8fafc;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--ink);
-  font-size: 15px;
-  font-weight: 800;
-  grid-column: 1 / -1;
-  padding: 10px 12px;
-}
-
 .dialog-field {
   display: grid;
   gap: 7px;

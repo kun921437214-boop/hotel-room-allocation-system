@@ -998,9 +998,6 @@ function openDialog(title, fields, initial, onSave) {
   $("#dialogForm").classList.toggle("room-dialog-card", fields.some((field) => field.largeDialog));
   $("#dialogTitle").textContent = title;
   $("#dialogFields").innerHTML = fields.map((field) => {
-    if (field.type === "section") {
-      return `<div class="dialog-section-title">${field.label}</div>`;
-    }
     if (field.type === "hidden") {
       const value = initial[field.key] ?? field.default ?? "";
       return `<input name="${field.key}" type="hidden" value="${value}">`;
@@ -1078,7 +1075,6 @@ function normalizeNeedValues(values) {
 
 function needFields() {
   return [
-    { label: "人员信息", type: "section" },
     { key: "name", label: "姓名" },
     { key: "gender", label: "性别", type: "select", options: ["男", "女"] },
     { key: "phone", label: "电话" },
@@ -1087,10 +1083,8 @@ function needFields() {
     { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
     { key: "people", type: "hidden", default: 1 },
     { key: "status", type: "hidden", default: "未分配" },
-    { label: "酒店信息", type: "section" },
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
     { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
-    { label: "备注", type: "section" },
     { key: "note", label: "备注", type: "textarea" }
   ];
 }
