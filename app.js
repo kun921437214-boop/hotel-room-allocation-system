@@ -362,7 +362,13 @@ function needSearchText(need) {
 
 function currentFilteredNeeds() {
   const search = getSearch();
-  return state.needs.filter((need) => needSearchText(need).includes(search));
+  const hotel = $("#needHotelFilter")?.value || "all";
+  const identity = $("#needIdentityFilter")?.value || "all";
+  return state.needs.filter((need) => (
+    needSearchText(need).includes(search) &&
+    needMatchesHotel(need, hotel) &&
+    needMatchesIdentity(need, identity)
+  ));
 }
 
 function formatDateForDisplay(value) {
@@ -996,13 +1002,28 @@ function renderUseBars() {
   `).join("");
 }
 
+function optionHtml(value, label = value) {
+  return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+}
+
+function setSelectOptions(selector, optionsHtml, fallback = "all") {
+  const select = $(selector);
+  if (!select) return;
+  const previous = select.value || fallback;
+  select.innerHTML = optionsHtml;
+  const hasPrevious = Array.from(select.options).some((option) => option.value === previous);
+  select.value = hasPrevious ? previous : fallback;
+}
+
 function populateFilters() {
-  const hotelOptions = [`<option value="all">全部酒店</option>`, ...needHotels().map((hotel) => `<option value="${hotel}">${hotel}</option>`)].join("");
-  const roleOptions = [`<option value="all">全部人员性质</option>`, ...roleIdentities().map((identity) => `<option value="${identity}">${identity}</option>`)].join("");
+  const hotelOptions = [optionHtml("all", "全部酒店"), ...needHotels().map((hotel) => optionHtml(hotel))].join("");
+  const roleOptions = [optionHtml("all", "全部人员性质"), ...roleIdentities().map((identity) => optionHtml(identity))].join("");
   const dateOptions = activeDates().map((date) => `<option value="${date}">${date}</option>`).join("");
-  $("#calendarIdentity").innerHTML = roleOptions;
-  $("#roleHotel").innerHTML = hotelOptions;
-  $("#onsiteHotel").innerHTML = hotelOptions;
+  setSelectOptions("#calendarIdentity", roleOptions);
+  setSelectOptions("#roleHotel", hotelOptions);
+  setSelectOptions("#onsiteHotel", hotelOptions);
+  setSelectOptions("#needHotelFilter", hotelOptions);
+  setSelectOptions("#needIdentityFilter", roleOptions);
   $("#onsiteDate").innerHTML = dateOptions;
   const dates = activeDates();
   if (!$("#calendarStartInput").value) $("#calendarStartInput").value = defaultHotelInfoRange.start;
@@ -1555,6 +1576,8 @@ function changeFields() {
 function bindEvents() {
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.view)));
   $("#searchInput").addEventListener("input", render);
+  $("#needHotelFilter")?.addEventListener("change", renderNeeds);
+  $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
   $("#calendarIdentity").addEventListener("change", renderCalendar);
   $("#roleHotel").addEventListener("change", renderRoleStats);
   $("#onsiteDate").addEventListener("change", renderOnsite);
