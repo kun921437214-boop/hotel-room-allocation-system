@@ -194,9 +194,19 @@ function roomTypeCountText(needs) {
   return roomTypeOptions.map((type) => `${type}${counts[type] || 0}`).join(" / ");
 }
 
+function roomTypeCountClass(type) {
+  if (type === "双标") return "room-type-standard";
+  if (type === "大床") return "room-type-king";
+  if (type === "套房") return "room-type-suite";
+  return "room-type-other";
+}
+
 function roomTypeCountLines(needs) {
   const counts = needTypeCounts(needs);
-  return roomTypeOptions.map((type) => `<div class="room-type-count-line">${type}：${counts[type] || 0}间</div>`).join("");
+  const extraTypes = Object.keys(counts).filter((type) => !roomTypeOptions.includes(type));
+  return [...roomTypeOptions, ...extraTypes].map((type) => (
+    `<div class="room-type-count-line ${roomTypeCountClass(type)}">${escapeHtml(type)}：${counts[type] || 0}间</div>`
+  )).join("");
 }
 
 function hotelRoomCountOnDate(date, hotel) {
