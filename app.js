@@ -675,7 +675,7 @@ function populateFilters() {
   $("#onsiteDate").innerHTML = dateOptions;
   const dates = activeDates();
   if (!$("#calendarStartInput").value) $("#calendarStartInput").value = dates[0] || defaultDate();
-  if (!$("#calendarEndInput").value) $("#calendarEndInput").value = dates.length ? addDays(dates[dates.length - 1], 1) : defaultDate(1);
+  if (!$("#calendarEndInput").value) $("#calendarEndInput").value = dates[dates.length - 1] || defaultDate();
   refreshCalendarDateRange();
   if (!$("#onsiteDate").value) $("#onsiteDate").value = activeDates()[0];
 }
@@ -683,8 +683,8 @@ function populateFilters() {
 function renderCalendar() {
   const selectedHotel = $("#calendarHotel").value || "all";
   const checkIn = $("#calendarStartInput").value || activeDates()[0] || defaultDate();
-  const checkOut = $("#calendarEndInput").value || addDays(checkIn, 1);
-  const dates = nightsBetween(checkIn, checkOut);
+  const checkOut = $("#calendarEndInput").value || checkIn;
+  const dates = checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
   const rooms = state.rooms
     .filter((room) => selectedHotel === "all" || (room.hotel || room.hotelId) === selectedHotel)
     .filter((room) => filteredText({ ...room, hotel: hotelName(room.hotel || room.hotelId) }).includes(getSearch()));
