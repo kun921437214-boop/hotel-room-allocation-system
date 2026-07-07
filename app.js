@@ -915,7 +915,10 @@ function renderNeeds() {
     { key: "assignedRoomTime", label: "已分配房间/时间", html: true },
     { key: "status", label: "状态", pill: true },
     { key: "note", label: "备注" }
-  ], rows.map((row) => ({ ...row, companionText: companionSummary(row.companions) })), (row) => `<button class="mini-btn" data-edit-need="${row.id}">编辑</button>`);
+  ], rows.map((row) => ({ ...row, companionText: companionSummary(row.companions) })), (row) => `
+    <button class="mini-btn" data-edit-need="${row.id}">编辑</button>
+    <button class="mini-btn danger-mini-btn" data-delete-need="${row.id}">删除</button>
+  `);
 }
 
 function renderRooms() {
@@ -1349,6 +1352,17 @@ function bindEvents() {
     const changeBtn = event.target.closest("[data-edit-change]");
     const checkBtn = event.target.closest("[data-toggle-checkin]");
     const deleteBookingBtn = event.target.closest("[data-delete-booking]");
+    const deleteNeedBtn = event.target.closest("[data-delete-need]");
+    if (deleteNeedBtn) {
+      const need = needById(deleteNeedBtn.dataset.deleteNeed);
+      if (!need) return;
+      if (!confirm(`确定删除 ${need.name || "这条入住需求"} 吗？关联的安排记录也会一起删除。`)) return;
+      state.needs = state.needs.filter((item) => item.id !== need.id);
+      state.bookings = state.bookings.filter((booking) => booking.needId !== need.id);
+      saveState();
+      render();
+      return;
+    }
     if (deleteBookingBtn) {
       const booking = state.bookings.find((item) => item.id === deleteBookingBtn.dataset.deleteBooking);
       if (!booking) return;
