@@ -524,6 +524,26 @@ function downloadNeedTemplate() {
   downloadBlob("入住需求批量上传模板.xls", html, "application/vnd.ms-excel;charset=utf-8");
 }
 
+function excelCellHtml(cell) {
+  return escapeHtml(cell).replace(/\n/g, "<br>");
+}
+
+function downloadStyledTable(filename, rows) {
+  const tableHtml = rows.map((row, rowIndex) => {
+    const tag = rowIndex === 0 ? "th" : "td";
+    return `<tr>${row.map((cell) => `<${tag}>${excelCellHtml(cell)}</${tag}>`).join("")}</tr>`;
+  }).join("");
+  const styles = `
+    <style>
+      table { border-collapse: collapse; font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 12pt; }
+      th, td { border: 1px solid #333; padding: 8px 10px; text-align: center; vertical-align: middle; mso-number-format: "\\@"; white-space: normal; }
+      th { background: #f2f4f7; font-weight: 700; }
+    </style>
+  `;
+  const html = `<!doctype html><html><head><meta charset="utf-8">${styles}</head><body><table>${tableHtml}</table></body></html>`;
+  downloadBlob(filename, html, "application/vnd.ms-excel;charset=utf-8");
+}
+
 function exportCurrentNeeds() {
   const needs = currentFilteredNeeds();
   if (!needs.length) {
@@ -551,19 +571,51 @@ function exportCurrentNeeds() {
       ]);
     });
   });
-  const tableHtml = rows.map((row, rowIndex) => {
-    const tag = rowIndex === 0 ? "th" : "td";
-    return `<tr>${row.map((cell) => `<${tag}>${escapeHtml(cell)}</${tag}>`).join("")}</tr>`;
-  }).join("");
-  const styles = `
-    <style>
-      table { border-collapse: collapse; font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 12pt; }
-      th, td { border: 1px solid #333; padding: 8px 10px; text-align: center; vertical-align: middle; mso-number-format: "\\@"; }
-      th { background: #f2f4f7; font-weight: 700; }
-    </style>
-  `;
-  const html = `<!doctype html><html><head><meta charset="utf-8">${styles}</head><body><table>${tableHtml}</table></body></html>`;
-  downloadBlob(`入住需求当前名单-${dateToValue(new Date())}.xls`, html, "application/vnd.ms-excel;charset=utf-8");
+  downloadStyledTable(`入住需求当前名单-${dateToValue(new Date())}.xls`, rows);
+}
+
+function dateRangeValues(startSelector, endSelector, fallbackStart = defaultHotelInfoRange.start, fallbackEnd = defaultHotelInfoRange.end) {
+  const checkIn = $(startSelector)?.value || fallbackStart;
+  const checkOut = $(endSelector)?.value || fallbackEnd;
+  return checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
+}
+
+function roomTypeExportText(needs) {
+  const counts = needTypeCounts(needs);
+  const extraTypes = Object.keys(counts).filter((type) => !roomTypeOptions.includes(type));
+  const visibleTypes = [...roomTypeOptions, ...extraTypes].filter((type) => (counts[type] || 0) > 0);
+  if (!visibleTypes.length) return "暂无";
+  return visibleTypes.map((type) => `${type}：${counts[type] || 0}间`).join("\n");
+}
+
+function exportHotelStats() {
+  const selectedIdentity = $("#calendarIdentity").value || "all";
+  const dates = dateRangeValues("#calendarStartInput", "#calendarEndInput", activeDates()[0] || defaultDate(), activeDates()[0] || defaultDate());
+  const hotels = needHotels();
+  if (!dates.length || !hotels.length) {
+    alert("当前筛选条件下没有可导出的酒店统计。");
+    return;
+  }
+  const rows = [["酒店", ...dates]];
+  hotels.forEach((hotel) => {
+    rows.push([hotel, ...dates.map((date) => roomTypeExportText(needStaysOnDate(date, hotel, selectedIdentity)))]);
+  });
+  downloadStyledTable(`酒店统计当前信息-${dateToValue(new Date())}.xls`, rows);
+}
+
+function exportRoleStats() {
+  const selectedHotel = $("#roleHotel").value || "all";
+  const dates = dateRangeValues("#roleStartInput", "#roleEndInput");
+  const identities = roleIdentities();
+  if (!dates.length || !identities.length) {
+    alert("当前筛选条件下没有可导出的角色统计。");
+    return;
+  }
+  const rows = [["人员性质", ...dates]];
+  identities.forEach((identity) => {
+    rows.push([identity, ...dates.map((date) => roomTypeExportText(roleNeedsOnDate(date, identity, selectedHotel)))]);
+  });
+  downloadStyledTable(`角色统计当前信息-${dateToValue(new Date())}.xls`, rows);
 }
 
 function parseCsv(text) {
@@ -1579,7 +1631,9 @@ function bindEvents() {
   $("#needHotelFilter")?.addEventListener("change", renderNeeds);
   $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
   $("#calendarIdentity").addEventListener("change", renderCalendar);
+  $("#exportHotelStatsBtn")?.addEventListener("click", exportHotelStats);
   $("#roleHotel").addEventListener("change", renderRoleStats);
+  $("#exportRoleStatsBtn")?.addEventListener("click", exportRoleStats);
   $("#onsiteDate").addEventListener("change", renderOnsite);
   $("#onsiteHotel").addEventListener("change", renderOnsite);
 
