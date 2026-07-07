@@ -446,7 +446,7 @@ function assignmentPurposeForNeed(need) {
 const roomBatchHeaders = ["酒店", "房间号", "楼层", "房型", "可住人数", "可用开始日期", "可用结束日期", "默认用途"];
 const roomTypeOptions = ["双标", "大床", "套房"];
 const roomUseOptions = ["未分配", "自己人", "工作人员", "导师", "嘉宾", "选手家庭", "合作方", "备用", "其他"];
-const needBatchHeaders = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "安排酒店", "房间类型", "入住日期", "离店日期", "备注"];
+const needBatchHeaders = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "安排酒店", "房间类型", "房间号", "入住日期", "离店日期", "备注"];
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
 const needStatusOptions = ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"];
@@ -486,9 +486,9 @@ function downloadRoomTemplate() {
 function downloadNeedTemplate() {
   const rows = [
     needBatchHeaders,
-    ["1", "姓名1", "男", "手机号1", "身份证号1", "工作人员", "汉庭", "双标", "2026/8/1", "2026/8/6", "房间大一点"],
-    ["1", "姓名2", "男", "手机号2", "身份证号2", "工作人员", "汉庭", "双标", "2026/8/1", "2026/8/6", "房间大一点"],
-    ["2", "姓名3", "女", "手机号3", "身份证号3", "评委", "万豪", "大床", "2026/8/2", "2026/8/5", "需要安静"]
+    ["1", "姓名1", "男", "手机号1", "身份证号1", "工作人员", "汉庭", "双标", "1001", "2026/8/1", "2026/8/6", "房间大一点"],
+    ["1", "姓名2", "男", "手机号2", "身份证号2", "工作人员", "汉庭", "双标", "1001", "2026/8/1", "2026/8/6", "房间大一点"],
+    ["2", "姓名3", "女", "手机号3", "身份证号3", "评委", "万豪", "大床", "2001", "2026/8/2", "2026/8/5", "需要安静"]
   ];
   const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
@@ -619,6 +619,7 @@ function batchNeedCommonFields(record) {
   return {
     hotel: normalizeArrangementHotel(recordValue(record, ["安排酒店", "酒店"])),
     roomType: normalizeNeedRoomType(recordValue(record, ["房间类型", "期望房型"])),
+    roomNo: record["房间号"] || "",
     checkIn: normalizeDateValue(record["入住日期"]),
     checkOut: normalizeDateValue(record["离店日期"])
   };
@@ -629,6 +630,7 @@ function assertGroupedNeedConsistency(records, sequence) {
   const fieldLabels = {
     hotel: "安排酒店",
     roomType: "房间类型",
+    roomNo: "房间号",
     checkIn: "入住日期",
     checkOut: "离店日期"
   };
@@ -672,6 +674,7 @@ function needFromGroupedBatchRecords(records, sequence) {
     checkOut: common.checkOut,
     hotel: common.hotel,
     roomType: common.roomType,
+    roomNo: common.roomNo,
     status: common.hotel ? "已分配" : "未分配",
     owner: "",
     note: remarksFromBatchRecords(records),
@@ -755,6 +758,7 @@ function needFromBatchRecord(record, index) {
     checkOut,
     hotel,
     roomType,
+    roomNo: record["房间号"] || "",
     status,
     owner: record["负责人"] || "",
     note: record["备注"] || "",
@@ -1219,7 +1223,7 @@ function renderNeeds() {
     { key: "stayTime", label: "入住时间", html: true },
     { key: "hotel", label: "安排酒店" },
     { key: "roomType", label: "房间类型" },
-    { key: "status", label: "状态", pill: true },
+    { key: "roomNo", label: "房间号" },
     { key: "note", label: "备注" }
   ], rows, (row) => `
     <button class="mini-btn" data-edit-need="${row.id}">编辑</button>
@@ -1450,6 +1454,7 @@ function needFields() {
     { key: "companions", type: "peopleRepeater" },
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
     { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
+    { key: "roomNo", label: "房间号" },
     { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
     { key: "note", label: "备注", type: "textarea" }
   ];

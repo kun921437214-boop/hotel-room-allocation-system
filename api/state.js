@@ -228,7 +228,7 @@ function readableMirrorTables(state) {
     "入住日期": need.checkIn || "",
     "离店日期": need.checkOut || "",
     "期望房型": need.roomType || "",
-    "分配状态": need.status || "",
+    "房间号": need.roomNo || "",
     "已分配房间/时间": assignedRoomTime(state, need.id),
     "负责人": need.owner || "",
     "备注": need.note || ""
@@ -271,7 +271,7 @@ function readableMirrorTables(state) {
 
   return [
     { name: "酒店房间查看", keyField: "房间ID", fields: ["房间ID", "酒店", "房间号", "楼层", "房型", "可住人数", "可用时间", "默认用途"], rows: rooms },
-    { name: "入住需求查看", keyField: "需求ID", fields: ["需求ID", "姓名/团队", "身份", "联系方式", "人数", "入住日期", "离店日期", "期望房型", "分配状态", "已分配房间/时间", "负责人", "备注"], rows: needs },
+    { name: "入住需求查看", keyField: "需求ID", fields: ["需求ID", "姓名/团队", "身份", "联系方式", "人数", "入住日期", "离店日期", "期望房型", "房间号", "已分配房间/时间", "负责人", "备注"], rows: needs },
     { name: "分房记录查看", keyField: "分房ID", fields: ["分房ID", "入住对象", "身份", "联系方式", "酒店房间", "入住日期", "离店日期", "人数", "分配用途", "状态", "是否确认", "是否到店", "备注"], rows: bookings },
     { name: "变更记录查看", keyField: "变更ID", fields: ["变更ID", "变更时间", "变更类型", "原酒店", "原房间", "新酒店", "新房间", "关联对象", "变更原因", "操作人", "同步酒店", "同步入住人", "备注"], rows: changes }
   ];
