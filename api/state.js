@@ -2,6 +2,11 @@ const FEISHU_BASE_URL = process.env.FEISHU_BASE_URL || "https://open.feishu.cn";
 const FEISHU_APP_TOKEN = process.env.FEISHU_APP_TOKEN || process.env.FEISHU_BITABLE_APP_TOKEN || "Mg3abeaEya2QptsxOjIchxSLndd";
 const SYNC_TABLE_NAME = process.env.FEISHU_SYNC_TABLE_NAME || "系统同步数据";
 const SYNC_RECORD_KEY = process.env.FEISHU_SYNC_RECORD_KEY || "hotel-room-state-v1";
+const ACTIVE_READABLE_TABLE_NAMES = ["住宿人员名单", "酒店统计查看", "角色统计查看"];
+const OBSOLETE_READABLE_TABLE_NAMES = ["入住需求查看", "酒店房间查看", "分房记录查看", "变更记录查看"];
+const ARRANGEMENT_HOTELS = ["汉庭", "如家", "万豪"];
+const IDENTITY_OPTIONS = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
+const ROOM_TYPE_FIELDS = ["双标", "大床", "套房", "其他"];
 
 const sampleData = {
   hotels: [
@@ -116,6 +121,7 @@ async function ensureReadableTable(tableName, fields) {
   const existing = tables.find((table) => table.name === tableName);
   if (existing?.table_id) {
     readableTableCache[tableName] = existing.table_id;
+    await ensureReadableFields(readableTableCache[tableName], fields);
     return readableTableCache[tableName];
   }
 
@@ -129,6 +135,40 @@ async function ensureReadableTable(tableName, fields) {
   readableTableCache[tableName] = created.table?.table_id || created.table_id;
   if (!readableTableCache[tableName]) throw new Error(`飞书查看表 ${tableName} 创建成功但没有返回 table_id。`);
   return readableTableCache[tableName];
+}
+
+async function listFields(tableId) {
+  const data = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields?page_size=100`);
+  return data.items || [];
+}
+
+async function ensureReadableFields(tableId, fields) {
+  const existingFields = await listFields(tableId);
+  const existingNames = new Set(existingFields.map((field) => field.field_name));
+  for (const fieldName of fields) {
+    if (!existingNames.has(fieldName)) {
+      await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields`, {
+        field_name: fieldName,
+        type: 1
+      });
+    }
+  }
+}
+
+async function deleteObsoleteReadableTables() {
+  const tables = await allTables();
+  const keepNames = new Set([SYNC_TABLE_NAME, ...ACTIVE_READABLE_TABLE_NAMES]);
+  for (const tableName of OBSOLETE_READABLE_TABLE_NAMES) {
+    if (keepNames.has(tableName)) continue;
+    const table = tables.find((item) => item.name === tableName);
+    if (!table?.table_id) continue;
+    try {
+      await feishu("DELETE", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${table.table_id}`);
+      delete readableTableCache[tableName];
+    } catch {
+      // 删除旧展示表失败不影响核心同步和新展示表刷新。
+    }
+  }
 }
 
 async function listRecords(tableId) {
@@ -213,6 +253,21 @@ function dateToUtcValue(date) {
   return Date.UTC(year, month - 1, day);
 }
 
+function dateToValue(date) {
+  return new Date(date).toISOString().slice(0, 10);
+}
+
+function nightsBetween(start, end) {
+  const startValue = dateToUtcValue(start);
+  const endValue = dateToUtcValue(end);
+  if (startValue === null || endValue === null || endValue <= startValue) return [];
+  const dates = [];
+  for (let cursor = startValue; cursor < endValue; cursor += 86400000) {
+    dates.push(dateToValue(cursor));
+  }
+  return dates;
+}
+
 function stayDayCount(need) {
   const start = dateToUtcValue(need.checkIn);
   const end = dateToUtcValue(need.checkOut);
@@ -220,75 +275,173 @@ function stayDayCount(need) {
   return Math.round((end - start) / 86400000);
 }
 
-function readableMirrorTables(state) {
-  const rooms = (state.rooms || []).map((room) => ({
-    "房间ID": room.id || "",
-    "酒店": hotelName(state, room.hotel || room.hotelId),
-    "房间号": room.roomNo || "",
-    "楼层": String(room.floor ?? ""),
-    "房型": room.type || "",
-    "可住人数": String(room.capacity ?? ""),
-    "可用时间": `${room.availableFrom || ""} 至 ${room.availableTo || ""}`,
-    "默认用途": room.defaultUse || ""
-  }));
+function normalizedNeedHotel(hotel) {
+  if (hotel === "汉庭酒店") return "汉庭";
+  if (hotel === "如家酒店") return "如家";
+  if (hotel === "万豪酒店") return "万豪";
+  return hotel || "";
+}
 
-  const needs = (state.needs || []).map((need) => ({
-    "需求ID": need.id || "",
-    "姓名/团队": need.name || "",
-    "身份": need.identity || "",
-    "联系方式": need.phone || "",
-    "人数": String(need.people ?? ""),
-    "入住日期": need.checkIn || "",
-    "离店日期": need.checkOut || "",
-    "入住天数": String(stayDayCount(need)),
-    "安排酒店": need.hotel || "",
-    "房间号": need.roomNo || "",
-    "期望房型": need.roomType || "",
-    "已分配房间/时间": assignedRoomTime(state, need.id),
-    "负责人": need.owner || "",
-    "备注": need.note || ""
-  }));
+function peopleForNeed(need) {
+  const companions = Array.isArray(need.companions) ? need.companions : [];
+  return [need, ...companions];
+}
 
-  const bookings = (state.bookings || []).map((booking) => {
-    const need = needById(state, booking.needId) || {};
-    return {
-      "分房ID": booking.id || "",
-      "入住对象": need.name || booking.needId || "",
-      "身份": need.identity || "",
-      "联系方式": need.phone || "",
-      "酒店房间": roomLabel(state, booking.roomId),
-      "入住日期": booking.checkIn || "",
-      "离店日期": booking.checkOut || "",
-      "人数": String(booking.people ?? ""),
-      "分配用途": booking.purpose || "",
-      "状态": booking.status || "",
-      "是否确认": booking.confirmed || "",
-      "是否到店": booking.checkedIn || "",
-      "备注": booking.note || ""
-    };
+function personIdentity(person, fallback = "") {
+  return person?.identity || fallback || "其他";
+}
+
+function normalizedRoomType(type) {
+  return ROOM_TYPE_FIELDS.includes(type) ? type : "其他";
+}
+
+function activeDates(state) {
+  const dates = Array.from(new Set((state.needs || []).flatMap((need) => nightsBetween(need.checkIn, need.checkOut)))).sort();
+  if (dates.length) return dates;
+  return Array.isArray(state.eventDates) ? [...state.eventDates].sort() : [];
+}
+
+function needHotels(state) {
+  const hotels = new Set(ARRANGEMENT_HOTELS);
+  (state.needs || []).forEach((need) => {
+    const hotel = normalizedNeedHotel(need.hotel);
+    if (hotel) hotels.add(hotel);
   });
+  return Array.from(hotels);
+}
 
-  const changes = (state.changes || []).map((change) => ({
-    "变更ID": change.id || "",
-    "变更时间": change.time || "",
-    "变更类型": change.type || "",
-    "原酒店": change.oldHotel || "",
-    "原房间": change.oldRoom || "",
-    "新酒店": change.newHotel || "",
-    "新房间": change.newRoom || "",
-    "关联对象": change.person || "",
-    "变更原因": change.reason || "",
-    "操作人": change.operator || "",
-    "同步酒店": change.hotelSynced || "",
-    "同步入住人": change.guestSynced || "",
-    "备注": change.note || ""
-  }));
+function roleIdentities(state) {
+  const identities = new Set(IDENTITY_OPTIONS);
+  (state.needs || []).forEach((need) => {
+    peopleForNeed(need).forEach((person) => identities.add(personIdentity(person, need.identity)));
+  });
+  return Array.from(identities).filter(Boolean);
+}
 
+function needMatchesIdentity(need, identity) {
+  return peopleForNeed(need).some((person) => personIdentity(person, need.identity) === identity);
+}
+
+function needStaysOnDate(need, date) {
+  return need.status !== "已取消" && need.checkIn && need.checkOut && date >= need.checkIn && date < need.checkOut;
+}
+
+function roomTypeCounts(needs) {
+  const counts = Object.fromEntries(ROOM_TYPE_FIELDS.map((field) => [field, 0]));
+  needs.forEach((need) => {
+    counts[normalizedRoomType(need.roomType)] += 1;
+  });
+  return counts;
+}
+
+function statRow(key, date, hotel, identity, needs) {
+  const counts = roomTypeCounts(needs);
+  const total = ROOM_TYPE_FIELDS.reduce((sum, field) => sum + counts[field], 0);
+  return {
+    "统计维度": key,
+    "日期": date,
+    "酒店": hotel,
+    "人员性质": identity,
+    "双标": String(counts["双标"]),
+    "大床": String(counts["大床"]),
+    "套房": String(counts["套房"]),
+    "其他": String(counts["其他"]),
+    "合计": String(total)
+  };
+}
+
+function personListRows(state) {
+  const rows = [];
+  let sequence = 1;
+  (state.needs || []).forEach((need) => {
+    peopleForNeed(need).forEach((person) => {
+      rows.push({
+        "序号": String(sequence),
+        "姓名": person.name || "",
+        "性别": person.gender || "",
+        "电话": person.phone || "",
+        "身份证号": person.idNo || "",
+        "人员性质": personIdentity(person, need.identity),
+        "入住日期": need.checkIn || "",
+        "离店日期": need.checkOut || "",
+        "入住天数": String(stayDayCount(need)),
+        "安排酒店": normalizedNeedHotel(need.hotel),
+        "房间号": need.roomNo || "",
+        "房间类型": need.roomType || "",
+        "备注": need.note || ""
+      });
+      sequence += 1;
+    });
+  });
+  return rows;
+}
+
+function hotelStatRows(state) {
+  const rows = [];
+  activeDates(state).forEach((date) => {
+    needHotels(state).forEach((hotel) => {
+      roleIdentities(state).forEach((identity) => {
+        const needs = (state.needs || []).filter((need) => (
+          needStaysOnDate(need, date) &&
+          normalizedNeedHotel(need.hotel) === hotel &&
+          needMatchesIdentity(need, identity)
+        ));
+        const total = needs.length;
+        if (total > 0) rows.push(statRow(`${date}｜${hotel}｜${identity}`, date, hotel, identity, needs));
+      });
+    });
+  });
+  return rows;
+}
+
+function roleStatRows(state) {
+  const rows = [];
+  activeDates(state).forEach((date) => {
+    roleIdentities(state).forEach((identity) => {
+      needHotels(state).forEach((hotel) => {
+        const needs = (state.needs || []).filter((need) => (
+          needStaysOnDate(need, date) &&
+          needMatchesIdentity(need, identity) &&
+          normalizedNeedHotel(need.hotel) === hotel
+        ));
+        const total = needs.length;
+        if (total > 0) rows.push(statRow(`${date}｜${identity}｜${hotel}`, date, hotel, identity, needs));
+      });
+    });
+  });
+  return rows;
+}
+
+function readableMirrorTables(state) {
   return [
-    { name: "酒店房间查看", keyField: "房间ID", fields: ["房间ID", "酒店", "房间号", "楼层", "房型", "可住人数", "可用时间", "默认用途"], rows: rooms },
-    { name: "入住需求查看", keyField: "需求ID", fields: ["需求ID", "姓名/团队", "身份", "联系方式", "人数", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "期望房型", "已分配房间/时间", "负责人", "备注"], rows: needs },
-    { name: "分房记录查看", keyField: "分房ID", fields: ["分房ID", "入住对象", "身份", "联系方式", "酒店房间", "入住日期", "离店日期", "人数", "分配用途", "状态", "是否确认", "是否到店", "备注"], rows: bookings },
-    { name: "变更记录查看", keyField: "变更ID", fields: ["变更ID", "变更时间", "变更类型", "原酒店", "原房间", "新酒店", "新房间", "关联对象", "变更原因", "操作人", "同步酒店", "同步入住人", "备注"], rows: changes }
+    {
+      name: "住宿人员名单",
+      keyField: "序号",
+      fields: ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "房间类型", "备注"],
+      rows: personListRows(state)
+    },
+    {
+      name: "酒店统计查看",
+      keyField: "统计维度",
+      fields: ["统计维度", "日期", "酒店", "人员性质", "双标", "大床", "套房", "其他", "合计"],
+      rows: hotelStatRows(state)
+    },
+    {
+      name: "角色统计查看",
+      keyField: "统计维度",
+      fields: ["统计维度", "日期", "人员性质", "酒店", "双标", "大床", "套房", "其他", "合计"],
+      rows: roleStatRows(state).map((row) => ({
+        "统计维度": row["统计维度"],
+        "日期": row["日期"],
+        "人员性质": row["人员性质"],
+        "酒店": row["酒店"],
+        "双标": row["双标"],
+        "大床": row["大床"],
+        "套房": row["套房"],
+        "其他": row["其他"],
+        "合计": row["合计"]
+      }))
+    }
   ];
 }
 
@@ -297,6 +450,7 @@ async function syncReadableMirrorTables(state) {
     const tableId = await ensureReadableTable(table.name, table.fields);
     await upsertReadableRecords(tableId, table.keyField, table.rows);
   }
+  await deleteObsoleteReadableTables();
 }
 
 module.exports = async function handler(req, res) {
