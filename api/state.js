@@ -18,6 +18,7 @@ const sampleData = {
 
 let tokenCache = { token: "", expiresAt: 0 };
 let tableIdCache = "";
+let readableTableCache = {};
 
 function json(res, status, body) {
   res.statusCode = status;
@@ -104,9 +105,59 @@ async function ensureSyncTableId() {
   return tableIdCache;
 }
 
+async function allTables() {
+  const data = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables?page_size=100`);
+  return data.items || [];
+}
+
+async function ensureReadableTable(tableName, fields) {
+  if (readableTableCache[tableName]) return readableTableCache[tableName];
+  const tables = await allTables();
+  const existing = tables.find((table) => table.name === tableName);
+  if (existing?.table_id) {
+    readableTableCache[tableName] = existing.table_id;
+    return readableTableCache[tableName];
+  }
+
+  const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables`, {
+    table: {
+      name: tableName,
+      default_view_name: "全部",
+      fields: fields.map((fieldName) => ({ field_name: fieldName, type: 1 }))
+    }
+  });
+  readableTableCache[tableName] = created.table?.table_id || created.table_id;
+  if (!readableTableCache[tableName]) throw new Error(`飞书查看表 ${tableName} 创建成功但没有返回 table_id。`);
+  return readableTableCache[tableName];
+}
+
 async function listRecords(tableId) {
   const data = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records?page_size=500`);
   return data.items || [];
+}
+
+async function upsertReadableRecords(tableId, keyField, rows) {
+  const existingRecords = await listRecords(tableId);
+  const existingByKey = new Map(existingRecords.map((record) => [String(record.fields?.[keyField] || ""), record]));
+  const incomingKeys = new Set(rows.map((row) => String(row[keyField] || "")));
+
+  for (const row of rows) {
+    const key = String(row[keyField] || "");
+    if (!key) continue;
+    const record = existingByKey.get(key);
+    if (record?.record_id) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${record.record_id}`, { fields: row });
+    } else {
+      await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records`, { fields: row });
+    }
+  }
+
+  for (const record of existingRecords) {
+    const key = String(record.fields?.[keyField] || "");
+    if (key && !incomingKeys.has(key)) {
+      await feishu("DELETE", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${record.record_id}`);
+    }
+  }
 }
 
 async function getSyncRecord(tableId) {
@@ -129,6 +180,108 @@ async function updateSyncRecord(tableId, recordId, state) {
     "最后更新时间": new Date().toISOString()
   };
   return feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${recordId}`, { fields });
+}
+
+function hotelName(state, id) {
+  return (state.hotels || []).find((hotel) => hotel.id === id || hotel.name === id)?.name || id || "";
+}
+
+function roomById(state, roomId) {
+  return (state.rooms || []).find((room) => room.id === roomId);
+}
+
+function needById(state, needId) {
+  return (state.needs || []).find((need) => need.id === needId);
+}
+
+function roomLabel(state, roomId) {
+  const room = roomById(state, roomId);
+  if (!room) return roomId || "";
+  return `${hotelName(state, room.hotel || room.hotelId)} ${room.roomNo}`;
+}
+
+function assignedRoomTime(state, needId) {
+  return (state.bookings || [])
+    .filter((booking) => booking.needId === needId && booking.status !== "取消")
+    .map((booking) => `${roomLabel(state, booking.roomId)}｜${booking.checkIn || ""} 至 ${booking.checkOut || ""}`)
+    .join("\n");
+}
+
+function readableMirrorTables(state) {
+  const rooms = (state.rooms || []).map((room) => ({
+    "房间ID": room.id || "",
+    "酒店": hotelName(state, room.hotel || room.hotelId),
+    "房间号": room.roomNo || "",
+    "楼层": String(room.floor ?? ""),
+    "房型": room.type || "",
+    "可住人数": String(room.capacity ?? ""),
+    "可用时间": `${room.availableFrom || ""} 至 ${room.availableTo || ""}`,
+    "默认用途": room.defaultUse || ""
+  }));
+
+  const needs = (state.needs || []).map((need) => ({
+    "需求ID": need.id || "",
+    "姓名/团队": need.name || "",
+    "身份": need.identity || "",
+    "联系方式": need.phone || "",
+    "人数": String(need.people ?? ""),
+    "入住日期": need.checkIn || "",
+    "离店日期": need.checkOut || "",
+    "期望房型": need.roomType || "",
+    "分配状态": need.status || "",
+    "已分配房间/时间": assignedRoomTime(state, need.id),
+    "负责人": need.owner || "",
+    "备注": need.note || ""
+  }));
+
+  const bookings = (state.bookings || []).map((booking) => {
+    const need = needById(state, booking.needId) || {};
+    return {
+      "分房ID": booking.id || "",
+      "入住对象": need.name || booking.needId || "",
+      "身份": need.identity || "",
+      "联系方式": need.phone || "",
+      "酒店房间": roomLabel(state, booking.roomId),
+      "入住日期": booking.checkIn || "",
+      "离店日期": booking.checkOut || "",
+      "人数": String(booking.people ?? ""),
+      "分配用途": booking.purpose || "",
+      "状态": booking.status || "",
+      "是否确认": booking.confirmed || "",
+      "是否到店": booking.checkedIn || "",
+      "备注": booking.note || ""
+    };
+  });
+
+  const changes = (state.changes || []).map((change) => ({
+    "变更ID": change.id || "",
+    "变更时间": change.time || "",
+    "变更类型": change.type || "",
+    "原酒店": change.oldHotel || "",
+    "原房间": change.oldRoom || "",
+    "新酒店": change.newHotel || "",
+    "新房间": change.newRoom || "",
+    "关联对象": change.person || "",
+    "变更原因": change.reason || "",
+    "操作人": change.operator || "",
+    "同步酒店": change.hotelSynced || "",
+    "同步入住人": change.guestSynced || "",
+    "备注": change.note || ""
+  }));
+
+  return [
+    { name: "酒店房间查看", keyField: "房间ID", fields: ["房间ID", "酒店", "房间号", "楼层", "房型", "可住人数", "可用时间", "默认用途"], rows: rooms },
+    { name: "入住需求查看", keyField: "需求ID", fields: ["需求ID", "姓名/团队", "身份", "联系方式", "人数", "入住日期", "离店日期", "期望房型", "分配状态", "已分配房间/时间", "负责人", "备注"], rows: needs },
+    { name: "分房记录查看", keyField: "分房ID", fields: ["分房ID", "入住对象", "身份", "联系方式", "酒店房间", "入住日期", "离店日期", "人数", "分配用途", "状态", "是否确认", "是否到店", "备注"], rows: bookings },
+    { name: "变更记录查看", keyField: "变更ID", fields: ["变更ID", "变更时间", "变更类型", "原酒店", "原房间", "新酒店", "新房间", "关联对象", "变更原因", "操作人", "同步酒店", "同步入住人", "备注"], rows: changes }
+  ];
+}
+
+async function syncReadableMirrorTables(state) {
+  for (const table of readableMirrorTables(state)) {
+    const tableId = await ensureReadableTable(table.name, table.fields);
+    await upsertReadableRecords(tableId, table.keyField, table.rows);
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -158,6 +311,7 @@ module.exports = async function handler(req, res) {
     } else {
       await createSyncRecord(tableId, body.state);
     }
+    await syncReadableMirrorTables(body.state);
     return json(res, 200, { ok: true, tableId });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "同步失败" });
