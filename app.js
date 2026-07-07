@@ -170,26 +170,36 @@ function roleIdentities() {
   return Array.from(names).filter(Boolean);
 }
 
-function needStaysOnDate(date, hotel = "all") {
+function needMatchesIdentity(need, identity = "all") {
+  return identity === "all" || peopleForNeed(need).some((person) => personIdentity(person, need.identity) === identity);
+}
+
+function needMatchesHotel(need, hotel = "all") {
+  return hotel === "all" || normalizedNeedHotel(need.hotel) === hotel;
+}
+
+function needStaysOnDate(date, hotel = "all", identity = "all") {
   return state.needs.filter((need) => (
     need.status !== "已取消" &&
     need.checkIn &&
     need.checkOut &&
     date >= need.checkIn &&
     date < need.checkOut &&
-    (hotel === "all" || normalizedNeedHotel(need.hotel) === hotel) &&
+    needMatchesHotel(need, hotel) &&
+    needMatchesIdentity(need, identity) &&
     filteredText(need).includes(getSearch())
   ));
 }
 
-function roleNeedsOnDate(date, identity = "all") {
+function roleNeedsOnDate(date, identity = "all", hotel = "all") {
   return state.needs.filter((need) => (
     need.status !== "已取消" &&
     need.checkIn &&
     need.checkOut &&
     date >= need.checkIn &&
     date < need.checkOut &&
-    (identity === "all" || peopleForNeed(need).some((person) => personIdentity(person, need.identity) === identity)) &&
+    needMatchesIdentity(need, identity) &&
+    needMatchesHotel(need, hotel) &&
     filteredText(need).includes(getSearch())
   ));
 }
@@ -769,8 +779,8 @@ function populateFilters() {
   const hotelOptions = [`<option value="all">全部酒店</option>`, ...needHotels().map((hotel) => `<option value="${hotel}">${hotel}</option>`)].join("");
   const roleOptions = [`<option value="all">全部人员性质</option>`, ...roleIdentities().map((identity) => `<option value="${identity}">${identity}</option>`)].join("");
   const dateOptions = activeDates().map((date) => `<option value="${date}">${date}</option>`).join("");
-  $("#calendarHotel").innerHTML = hotelOptions;
-  $("#roleIdentity").innerHTML = roleOptions;
+  $("#calendarIdentity").innerHTML = roleOptions;
+  $("#roleHotel").innerHTML = hotelOptions;
   $("#onsiteHotel").innerHTML = hotelOptions;
   $("#onsiteDate").innerHTML = dateOptions;
   const dates = activeDates();
@@ -784,11 +794,11 @@ function populateFilters() {
 }
 
 function renderCalendar() {
-  const selectedHotel = $("#calendarHotel").value || "all";
+  const selectedIdentity = $("#calendarIdentity").value || "all";
   const checkIn = $("#calendarStartInput").value || activeDates()[0] || defaultDate();
   const checkOut = $("#calendarEndInput").value || checkIn;
   const dates = checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
-  const hotels = needHotels().filter((hotel) => selectedHotel === "all" || hotel === selectedHotel);
+  const hotels = needHotels();
   if (!dates.length) {
     $("#roomBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
     return;
@@ -801,7 +811,7 @@ function renderCalendar() {
   const rows = hotels.flatMap((hotel) => [
     `<div class="board-cell room-name">${hotel}<small>按入住需求统计</small></div>`,
     ...dates.map((date) => {
-      const needs = needStaysOnDate(date, hotel);
+      const needs = needStaysOnDate(date, hotel, selectedIdentity);
       return `
         <div class="board-cell hotel-info-cell">
           <div class="room-type-counts">${roomTypeCountLines(needs)}</div>
@@ -813,11 +823,11 @@ function renderCalendar() {
 }
 
 function renderRoleStats() {
-  const selectedIdentity = $("#roleIdentity").value || "all";
+  const selectedHotel = $("#roleHotel").value || "all";
   const checkIn = $("#roleStartInput").value || defaultHotelInfoRange.start;
   const checkOut = $("#roleEndInput").value || defaultHotelInfoRange.end;
   const dates = checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
-  const identities = roleIdentities().filter((identity) => selectedIdentity === "all" || identity === selectedIdentity);
+  const identities = roleIdentities();
   if (!dates.length) {
     $("#roleStatsBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
     return;
@@ -830,7 +840,7 @@ function renderRoleStats() {
   const rows = identities.flatMap((identity) => [
     `<div class="board-cell room-name">${identity}<small>按人员性质统计</small></div>`,
     ...dates.map((date) => {
-      const needs = roleNeedsOnDate(date, identity);
+      const needs = roleNeedsOnDate(date, identity, selectedHotel);
       return `
         <div class="board-cell hotel-info-cell">
           <div class="room-type-counts">${roomTypeCountLines(needs)}</div>
@@ -1322,8 +1332,8 @@ function changeFields() {
 function bindEvents() {
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.view)));
   $("#searchInput").addEventListener("input", render);
-  $("#calendarHotel").addEventListener("change", renderCalendar);
-  $("#roleIdentity").addEventListener("change", renderRoleStats);
+  $("#calendarIdentity").addEventListener("change", renderCalendar);
+  $("#roleHotel").addEventListener("change", renderRoleStats);
   $("#onsiteDate").addEventListener("change", renderOnsite);
   $("#onsiteHotel").addEventListener("change", renderOnsite);
 
