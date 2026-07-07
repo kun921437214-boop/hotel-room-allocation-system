@@ -342,6 +342,29 @@ function getSearch() {
   return $("#searchInput").value.trim().toLowerCase();
 }
 
+function personText(person) {
+  return [person.name, person.gender, person.phone, person.idNo, person.identity].filter(Boolean).join(" ");
+}
+
+function needSearchText(need) {
+  const peopleText = peopleForNeed(need).map(personText).join(" ");
+  return [
+    peopleText,
+    need.checkIn,
+    need.checkOut,
+    need.hotel,
+    need.roomNo,
+    need.roomType,
+    need.note,
+    need.owner
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function currentFilteredNeeds() {
+  const search = getSearch();
+  return state.needs.filter((need) => needSearchText(need).includes(search));
+}
+
 function formatDateForDisplay(value) {
   return value ? value.replaceAll("-", "/") : "";
 }
@@ -493,6 +516,38 @@ function downloadNeedTemplate() {
   const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
   downloadBlob("入住需求批量上传模板.xls", html, "application/vnd.ms-excel;charset=utf-8");
+}
+
+function exportCurrentNeeds() {
+  const needs = currentFilteredNeeds();
+  if (!needs.length) {
+    alert("当前搜索条件下没有可导出的入住需求。");
+    return;
+  }
+  const headers = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "房间类型", "备注"];
+  const rows = [headers];
+  needs.forEach((need, index) => {
+    peopleForNeed(need).forEach((person) => {
+      rows.push([
+        String(index + 1),
+        person.name || "",
+        person.gender || "",
+        person.phone || "",
+        person.idNo || "",
+        person.identity || "",
+        need.checkIn || "",
+        need.checkOut || "",
+        String(needNightCount(need)),
+        need.hotel || "",
+        need.roomNo || "",
+        need.roomType || "",
+        need.note || ""
+      ]);
+    });
+  });
+  const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
+  downloadBlob(`入住需求当前名单-${dateToValue(new Date())}.xls`, html, "application/vnd.ms-excel;charset=utf-8");
 }
 
 function parseCsv(text) {
@@ -1200,8 +1255,7 @@ function stayTimeCell(need) {
 }
 
 function renderNeeds() {
-  const rows = state.needs
-    .filter((need) => filteredText(need).includes(getSearch()))
+  const rows = currentFilteredNeeds()
     .map((need, index) => ({
       ...need,
       sequence: index + 1,
@@ -1553,6 +1607,7 @@ function bindEvents() {
     });
   });
   $("#downloadNeedTemplateBtn").addEventListener("click", downloadNeedTemplate);
+  $("#exportCurrentNeedsBtn").addEventListener("click", exportCurrentNeeds);
   $("#needBatchInput").addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (!file) return;
