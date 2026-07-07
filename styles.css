@@ -553,7 +553,9 @@ textarea {
   border-bottom: 1px solid var(--line);
   display: grid;
   gap: 4px;
-  align-content: start;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
 }
 
 .board-cell.header,
@@ -568,12 +570,14 @@ textarea {
 
 .hotel-info-cell {
   align-content: center;
+  justify-items: center;
 }
 
 .room-type-counts {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  width: 100%;
 }
 
 .room-type-count-line {
@@ -583,6 +587,7 @@ textarea {
   font-weight: 700;
   line-height: 1.35;
   padding: 5px 10px;
+  text-align: center;
   white-space: nowrap;
 }
 

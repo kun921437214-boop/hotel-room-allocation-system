@@ -414,6 +414,7 @@ const needBatchHeaders = ["姓名/团队名称", "身份类型", "联系方式",
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长"];
 const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
 const needStatusOptions = ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"];
+const defaultHotelInfoRange = { start: "2026-07-29", end: "2026-08-06" };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -744,8 +745,8 @@ function populateFilters() {
   $("#onsiteHotel").innerHTML = hotelOptions;
   $("#onsiteDate").innerHTML = dateOptions;
   const dates = activeDates();
-  if (!$("#calendarStartInput").value) $("#calendarStartInput").value = dates[0] || defaultDate();
-  if (!$("#calendarEndInput").value) $("#calendarEndInput").value = dates[dates.length - 1] || defaultDate();
+  if (!$("#calendarStartInput").value) $("#calendarStartInput").value = defaultHotelInfoRange.start;
+  if (!$("#calendarEndInput").value) $("#calendarEndInput").value = defaultHotelInfoRange.end;
   refreshCalendarDateRange();
   if (!$("#onsiteDate").value) $("#onsiteDate").value = activeDates()[0];
 }
@@ -776,7 +777,7 @@ function renderCalendar() {
       `;
     })
   ]);
-  $("#roomBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 210px repeat(${dates.length}, minmax(168px, 1fr))">${[...header, ...rows].join("")}</div>`;
+  $("#roomBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 136px repeat(${dates.length}, minmax(124px, 1fr))">${[...header, ...rows].join("")}</div>`;
 }
 
 function populateAssignmentForm() {
