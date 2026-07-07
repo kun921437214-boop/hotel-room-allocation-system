@@ -938,27 +938,51 @@ function companionSummary(companions) {
   return companions.map((person) => person.name || person.phone || "未命名").join("、");
 }
 
+function personInfoLine(person, label = "") {
+  const parts = [person.name, person.gender, person.phone, person.idNo].filter(Boolean).map(escapeHtml);
+  const text = parts.length ? parts.join("｜") : "未填写人员信息";
+  return `<div class="person-info-line">${label ? `<span>${escapeHtml(label)}</span>` : ""}<strong>${text}</strong></div>`;
+}
+
+function peopleInfoCell(need) {
+  const companions = Array.isArray(need.companions) ? need.companions : [];
+  return `
+    <div class="people-info-cell">
+      ${personInfoLine(need, "主")}
+      ${companions.map((person, index) => personInfoLine(person, `增${index + 1}`)).join("")}
+    </div>
+  `;
+}
+
+function stayTimeCell(need) {
+  return `
+    <div class="stay-time-cell">
+      <div><span>入住</span><strong>${escapeHtml(need.checkIn || "")}</strong></div>
+      <div><span>离店</span><strong>${escapeHtml(need.checkOut || "")}</strong></div>
+    </div>
+  `;
+}
+
 function renderNeeds() {
   const rows = state.needs
-    .map((need) => ({ ...need, ...assignmentSummaryForNeed(need.id) }))
-    .filter((need) => filteredText(need).includes(getSearch()));
+    .filter((need) => filteredText(need).includes(getSearch()))
+    .map((need, index) => ({
+      ...need,
+      sequence: index + 1,
+      peopleInfo: peopleInfoCell(need),
+      stayTime: stayTimeCell(need)
+    }));
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，未分配 ${rows.filter((item) => item.status === "未分配").length} 条`;
   $("#needsTable").innerHTML = table([
-    { key: "id", label: "需求ID" },
-    { key: "name", label: "姓名" },
-    { key: "gender", label: "性别" },
-    { key: "phone", label: "电话" },
-    { key: "idNo", label: "身份证号" },
-    { key: "companionText", label: "增加人员" },
+    { key: "sequence", label: "序号" },
+    { key: "peopleInfo", label: "人员信息", html: true },
     { key: "identity", label: "人员性质" },
-    { key: "checkIn", label: "入住" },
-    { key: "checkOut", label: "离店" },
+    { key: "stayTime", label: "入住时间", html: true },
     { key: "hotel", label: "安排酒店" },
     { key: "roomType", label: "房间类型" },
-    { key: "assignedRoomTime", label: "已分配房间/时间", html: true },
     { key: "status", label: "状态", pill: true },
     { key: "note", label: "备注" }
-  ], rows.map((row) => ({ ...row, companionText: companionSummary(row.companions) })), (row) => `
+  ], rows, (row) => `
     <button class="mini-btn" data-edit-need="${row.id}">编辑</button>
     <button class="mini-btn danger-mini-btn" data-delete-need="${row.id}">删除</button>
   `);
