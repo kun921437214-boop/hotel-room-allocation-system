@@ -446,7 +446,7 @@ function assignmentPurposeForNeed(need) {
 const roomBatchHeaders = ["酒店", "房间号", "楼层", "房型", "可住人数", "可用开始日期", "可用结束日期", "默认用途"];
 const roomTypeOptions = ["双标", "大床", "套房"];
 const roomUseOptions = ["未分配", "自己人", "工作人员", "导师", "嘉宾", "选手家庭", "合作方", "备用", "其他"];
-const needBatchHeaders = ["姓名", "性别", "电话", "身份证号", "人员性质", "增加人员姓名", "增加人员性别", "增加人员电话", "增加人员身份证号", "增加人员性质", "安排酒店", "房间类型", "入住日期", "离店日期", "备注"];
+const needBatchHeaders = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "安排酒店", "房间类型", "入住日期", "离店日期", "备注"];
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
 const needStatusOptions = ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"];
@@ -486,8 +486,9 @@ function downloadRoomTemplate() {
 function downloadNeedTemplate() {
   const rows = [
     needBatchHeaders,
-    ["李春来", "男", "13259482298", "52222419940105981X", "工作人员", "王丰领", "男", "13259482299", "52222419940206981X", "工作人员", "汉庭", "双标", "2026-08-01", "2026-08-06", "房间大一点"],
-    ["陈思雨", "女", "13800000001", "110101199608082224", "评委", "", "", "", "", "", "万豪", "大床", "2026-08-02", "2026-08-05", "需要安静"]
+    ["1", "姓名1", "男", "手机号1", "身份证号1", "工作人员", "汉庭", "双标", "2026/8/1", "2026/8/6", "房间大一点"],
+    ["1", "姓名2", "男", "手机号2", "身份证号2", "工作人员", "汉庭", "双标", "2026/8/1", "2026/8/6", "房间大一点"],
+    ["2", "姓名3", "女", "手机号3", "身份证号3", "评委", "万豪", "大床", "2026/8/2", "2026/8/5", "需要安静"]
   ];
   const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
@@ -588,6 +589,16 @@ function normalizeArrangementHotel(value) {
   return hotel === "未安排" ? "" : hotel;
 }
 
+function personFromBatchRecord(record, fallbackIdentity = "其他") {
+  return {
+    name: recordValue(record, ["姓名", "姓名/团队名称"]).trim(),
+    gender: normalizeGenderValue(record["性别"]),
+    phone: recordValue(record, ["电话", "联系方式"]),
+    idNo: record["身份证号"] || "",
+    identity: normalizeIdentityValue(recordValue(record, ["人员性质", "身份类型"]), fallbackIdentity)
+  };
+}
+
 function companionsFromBatchRecord(record, mainIdentity) {
   const names = splitBatchList(record["增加人员姓名"]);
   const genders = splitBatchList(record["增加人员性别"]);
@@ -602,6 +613,93 @@ function companionsFromBatchRecord(record, mainIdentity) {
     idNo: idNos[index] || "",
     identity: normalizeIdentityValue(identities[index], mainIdentity)
   })).filter((person) => person.name || person.phone || person.idNo);
+}
+
+function batchNeedCommonFields(record) {
+  return {
+    hotel: normalizeArrangementHotel(recordValue(record, ["安排酒店", "酒店"])),
+    roomType: normalizeNeedRoomType(recordValue(record, ["房间类型", "期望房型"])),
+    checkIn: normalizeDateValue(record["入住日期"]),
+    checkOut: normalizeDateValue(record["离店日期"])
+  };
+}
+
+function assertGroupedNeedConsistency(records, sequence) {
+  const first = batchNeedCommonFields(records[0]);
+  const fieldLabels = {
+    hotel: "安排酒店",
+    roomType: "房间类型",
+    checkIn: "入住日期",
+    checkOut: "离店日期"
+  };
+  records.slice(1).forEach((record) => {
+    const current = batchNeedCommonFields(record);
+    Object.keys(fieldLabels).forEach((key) => {
+      if (current[key] !== first[key]) {
+        throw new Error(`序号 ${sequence} 的${fieldLabels[key]}不一致，请统一后再上传`);
+      }
+    });
+  });
+  return first;
+}
+
+function remarksFromBatchRecords(records) {
+  return Array.from(new Set(records.map((record) => String(record["备注"] || "").trim()).filter(Boolean))).join("；");
+}
+
+function needFromGroupedBatchRecords(records, sequence) {
+  const common = assertGroupedNeedConsistency(records, sequence);
+  if (!common.checkIn || !common.checkOut) {
+    throw new Error(`序号 ${sequence} 缺少入住日期或离店日期`);
+  }
+  if (common.checkIn >= common.checkOut) {
+    throw new Error(`序号 ${sequence} 离店日期必须晚于入住日期`);
+  }
+  const people = records.map((record) => personFromBatchRecord(record)).filter((person) => person.name || person.phone || person.idNo);
+  if (!people.length || !people[0].name) {
+    throw new Error(`序号 ${sequence} 缺少姓名`);
+  }
+  const [mainPerson, ...companions] = people;
+  return {
+    name: mainPerson.name,
+    identity: mainPerson.identity,
+    gender: mainPerson.gender,
+    phone: mainPerson.phone,
+    idNo: mainPerson.idNo,
+    companions,
+    people: people.length,
+    checkIn: common.checkIn,
+    checkOut: common.checkOut,
+    hotel: common.hotel,
+    roomType: common.roomType,
+    status: common.hotel ? "已分配" : "未分配",
+    owner: "",
+    note: remarksFromBatchRecords(records),
+    adults: people.length,
+    children: 0,
+    sameRoom: "是",
+    share: "否",
+    quiet: "否",
+    smokeFree: "否",
+    lowFloor: "否",
+    nearElevator: "否",
+    confirmed: "否"
+  };
+}
+
+function needsFromBatchRecords(records) {
+  const hasSequenceHeader = records.some((record) => Object.prototype.hasOwnProperty.call(record, "序号"));
+  if (!hasSequenceHeader) {
+    return records.map((record, index) => needFromBatchRecord(record, index));
+  }
+  const groups = new Map();
+  records.forEach((record, index) => {
+    const sequence = String(record["序号"] || "").trim();
+    if (!sequence) throw new Error(`第 ${index + 2} 行缺少序号`);
+    if (!groups.has(sequence)) groups.set(sequence, []);
+    groups.get(sequence).push(record);
+  });
+  return Array.from(groups.entries()).map(([sequence, groupedRecords]) => needFromGroupedBatchRecords(groupedRecords, sequence));
 }
 
 function roomFromBatchRecord(record, index) {
@@ -707,7 +805,7 @@ async function importNeedBatch(file) {
   }
   const needs = [];
   try {
-    records.forEach((record, index) => needs.push(needFromBatchRecord(record, index)));
+    needs.push(...needsFromBatchRecords(records));
   } catch (error) {
     alert(error.message);
     return;
