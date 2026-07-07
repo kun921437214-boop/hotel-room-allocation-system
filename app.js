@@ -446,7 +446,7 @@ function assignmentPurposeForNeed(need) {
 const roomBatchHeaders = ["酒店", "房间号", "楼层", "房型", "可住人数", "可用开始日期", "可用结束日期", "默认用途"];
 const roomTypeOptions = ["双标", "大床", "套房"];
 const roomUseOptions = ["未分配", "自己人", "工作人员", "导师", "嘉宾", "选手家庭", "合作方", "备用", "其他"];
-const needBatchHeaders = ["姓名/团队名称", "身份类型", "联系方式", "人数", "入住日期", "离店日期", "期望房型", "分配状态", "负责人", "备注"];
+const needBatchHeaders = ["姓名", "性别", "电话", "身份证号", "人员性质", "增加人员姓名", "增加人员性别", "增加人员电话", "增加人员身份证号", "增加人员性质", "安排酒店", "房间类型", "入住日期", "离店日期", "备注"];
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
 const needStatusOptions = ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"];
@@ -486,8 +486,8 @@ function downloadRoomTemplate() {
 function downloadNeedTemplate() {
   const rows = [
     needBatchHeaders,
-    ["慧慧", "工作人员", "13800000001", "1", "2026-08-01", "2026-08-04", "双床房", "未分配", "现场运营", "晚到保房"],
-    ["李春来、王丰领", "工作人员", "13800000002", "2", "2026-08-02", "2026-08-06", "双床房", "未分配", "现场运营", ""]
+    ["李春来", "男", "13259482298", "52222419940105981X", "工作人员", "王丰领", "男", "13259482299", "52222419940206981X", "工作人员", "汉庭", "双标", "2026-08-01", "2026-08-06", "房间大一点"],
+    ["陈思雨", "女", "13800000001", "110101199608082224", "评委", "", "", "", "", "", "万豪", "大床", "2026-08-02", "2026-08-05", "需要安静"]
   ];
   const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
@@ -557,6 +557,53 @@ function normalizeDateValue(value) {
   return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
 }
 
+function recordValue(record, keys) {
+  return keys.map((key) => record[key]).find((value) => String(value || "").trim()) || "";
+}
+
+function splitBatchList(value) {
+  return String(value || "")
+    .split(/[；;、,，\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeIdentityValue(value, fallback = "其他") {
+  const text = String(value || "").trim();
+  return identityOptions.includes(text) ? text : fallback;
+}
+
+function normalizeGenderValue(value) {
+  const text = String(value || "").trim();
+  return ["男", "女"].includes(text) ? text : "";
+}
+
+function normalizeNeedRoomType(value) {
+  const type = normalizedRoomType(value);
+  return type === "未填" ? "其他" : type;
+}
+
+function normalizeArrangementHotel(value) {
+  const hotel = String(value || "").trim();
+  return hotel === "未安排" ? "" : hotel;
+}
+
+function companionsFromBatchRecord(record, mainIdentity) {
+  const names = splitBatchList(record["增加人员姓名"]);
+  const genders = splitBatchList(record["增加人员性别"]);
+  const phones = splitBatchList(record["增加人员电话"]);
+  const idNos = splitBatchList(record["增加人员身份证号"]);
+  const identities = splitBatchList(record["增加人员性质"]);
+  const count = Math.max(names.length, genders.length, phones.length, idNos.length, identities.length);
+  return Array.from({ length: count }, (_, index) => ({
+    name: names[index] || "",
+    gender: normalizeGenderValue(genders[index]),
+    phone: phones[index] || "",
+    idNo: idNos[index] || "",
+    identity: normalizeIdentityValue(identities[index], mainIdentity)
+  })).filter((person) => person.name || person.phone || person.idNo);
+}
+
 function roomFromBatchRecord(record, index) {
   const hotel = record["酒店"]?.trim();
   const roomNo = record["房间号"]?.trim();
@@ -583,30 +630,37 @@ function roomFromBatchRecord(record, index) {
 }
 
 function needFromBatchRecord(record, index) {
-  const name = record["姓名/团队名称"]?.trim();
+  const name = recordValue(record, ["姓名", "姓名/团队名称"]).trim();
   const checkIn = normalizeDateValue(record["入住日期"]);
   const checkOut = normalizeDateValue(record["离店日期"]);
   if (!name || !checkIn || !checkOut) {
-    throw new Error(`第 ${index + 2} 行缺少姓名/团队名称、入住日期或离店日期`);
+    throw new Error(`第 ${index + 2} 行缺少姓名、入住日期或离店日期`);
   }
   if (checkIn >= checkOut) {
     throw new Error(`第 ${index + 2} 行离店日期必须晚于入住日期`);
   }
-  const identity = identityOptions.includes(record["身份类型"]) ? record["身份类型"] : "其他";
-  const roomType = roomTypeOptions.includes(record["期望房型"]) ? record["期望房型"] : "其他";
-  const status = needStatusOptions.includes(record["分配状态"]) ? record["分配状态"] : "未分配";
+  const identity = normalizeIdentityValue(recordValue(record, ["人员性质", "身份类型"]));
+  const companions = companionsFromBatchRecord(record, identity);
+  const hotel = normalizeArrangementHotel(recordValue(record, ["安排酒店", "酒店"]));
+  const roomType = normalizeNeedRoomType(recordValue(record, ["房间类型", "期望房型"]));
+  const status = needStatusOptions.includes(record["分配状态"]) ? record["分配状态"] : hotel ? "已分配" : "未分配";
+  const people = Math.max(1, Number(record["人数"]) || 1 + companions.length);
   return {
     name,
     identity,
-    phone: record["联系方式"] || "",
-    people: Number(record["人数"]) || 1,
+    gender: normalizeGenderValue(record["性别"]),
+    phone: recordValue(record, ["电话", "联系方式"]),
+    idNo: record["身份证号"] || "",
+    companions,
+    people,
     checkIn,
     checkOut,
+    hotel,
     roomType,
     status,
     owner: record["负责人"] || "",
     note: record["备注"] || "",
-    adults: Number(record["人数"]) || 1,
+    adults: people,
     children: 0,
     sameRoom: "是",
     share: "否",
