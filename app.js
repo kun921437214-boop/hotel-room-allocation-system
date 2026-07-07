@@ -1282,7 +1282,7 @@ function bindEvents() {
   });
   $("#dialogCancel").addEventListener("click", () => $("#editDialog").close());
 
-  $("#exportBtn").addEventListener("click", () => {
+  $("#exportBtn")?.addEventListener("click", () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1292,7 +1292,7 @@ function bindEvents() {
     URL.revokeObjectURL(url);
   });
 
-  $("#importInput").addEventListener("change", async (event) => {
+  $("#importInput")?.addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (!file) return;
     const text = await file.text();
@@ -1301,7 +1301,7 @@ function bindEvents() {
     render();
   });
 
-  $("#resetBtn").addEventListener("click", () => {
+  $("#resetBtn")?.addEventListener("click", () => {
     if (!confirm("确定恢复样例数据吗？当前本地修改会被覆盖。")) return;
     state = structuredClone(sampleData);
     saveState();

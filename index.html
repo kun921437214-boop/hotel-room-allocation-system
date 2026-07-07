@@ -15,7 +15,6 @@
           </div>
           <div>
             <h1>活动房务</h1>
-            <p>MRBS 思路改造样机</p>
           </div>
         </div>
         <nav class="nav" aria-label="主要视图">
@@ -25,16 +24,11 @@
           <button class="nav-item" data-view="needs">入住需求</button>
           <button class="nav-item" data-view="rooms">酒店房间</button>
         </nav>
-        <div class="sidebar-note">
-          <strong>模型参考</strong>
-          <p>酒店 = Area，房间 = Room，入住分配 = Entry。系统会自动检查同房同晚重复分配。</p>
-        </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
           <div>
-            <p class="eyebrow">大型朗诵展示活动</p>
             <h2 id="viewTitle">总览</h2>
           </div>
           <div class="toolbar">
@@ -42,12 +36,6 @@
               <span>搜索</span>
               <input id="searchInput" type="search" placeholder="姓名、酒店、房间号">
             </label>
-            <button class="ghost-btn" id="exportBtn" type="button">导出 JSON</button>
-            <label class="ghost-btn file-btn">
-              导入 JSON
-              <input id="importInput" type="file" accept="application/json">
-            </label>
-            <button class="danger-btn" id="resetBtn" type="button">恢复样例</button>
             <span class="sync-status" id="syncStatus">正在连接共享数据</span>
           </div>
         </header>
