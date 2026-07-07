@@ -525,13 +525,26 @@ function downloadNeedTemplate() {
 }
 
 function excelCellHtml(cell) {
-  return escapeHtml(cell).replace(/\n/g, "<br>");
+  const value = typeof cell === "object" && cell !== null ? cell.value : cell;
+  return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function excelCellAttributes(cell) {
+  if (typeof cell !== "object" || cell === null) return "";
+  return [
+    cell.colspan ? ` colspan="${cell.colspan}"` : "",
+    cell.rowspan ? ` rowspan="${cell.rowspan}"` : "",
+    cell.className ? ` class="${escapeHtml(cell.className)}"` : ""
+  ].join("");
 }
 
 function downloadStyledTable(filename, rows) {
   const tableHtml = rows.map((row, rowIndex) => {
-    const tag = rowIndex === 0 ? "th" : "td";
-    return `<tr>${row.map((cell) => `<${tag}>${excelCellHtml(cell)}</${tag}>`).join("")}</tr>`;
+    return `<tr>${row.map((cell) => {
+      const isHeader = rowIndex === 0 || (typeof cell === "object" && cell !== null && cell.header);
+      const tag = isHeader ? "th" : "td";
+      return `<${tag}${excelCellAttributes(cell)}>${excelCellHtml(cell)}</${tag}>`;
+    }).join("")}</tr>`;
   }).join("");
   const styles = `
     <style>
@@ -580,12 +593,27 @@ function dateRangeValues(startSelector, endSelector, fallbackStart = defaultHote
   return checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
 }
 
-function roomTypeExportText(needs) {
+function statsExportRoomTypes(rowsByDate) {
+  const counts = rowsByDate.flatMap((items) => Object.keys(needTypeCounts(items)));
+  const extraTypes = Array.from(new Set(counts.filter((type) => !roomTypeOptions.includes(type))));
+  return [...roomTypeOptions, ...extraTypes];
+}
+
+function statsExportHeaderRows(firstColumnLabel, dates, roomTypes) {
+  return [
+    [
+      { value: firstColumnLabel, rowspan: 2, header: true },
+      ...dates.map((date) => ({ value: date, colspan: roomTypes.length, header: true }))
+    ],
+    dates.flatMap(() => roomTypes.map((type) => ({ value: type, header: true })))
+  ];
+}
+
+function statsExportCells(needs, roomTypes) {
   const counts = needTypeCounts(needs);
-  const extraTypes = Object.keys(counts).filter((type) => !roomTypeOptions.includes(type));
-  const visibleTypes = [...roomTypeOptions, ...extraTypes].filter((type) => (counts[type] || 0) > 0);
-  if (!visibleTypes.length) return "暂无";
-  return visibleTypes.map((type) => `${type}：${counts[type] || 0}间`).join("\n");
+  const total = roomTypes.reduce((sum, type) => sum + (counts[type] || 0), 0);
+  if (!total) return roomTypes.map((_, index) => (index === 0 ? "暂无" : ""));
+  return roomTypes.map((type) => (counts[type] ? `${counts[type]}间` : ""));
 }
 
 function exportHotelStats() {
@@ -596,9 +624,14 @@ function exportHotelStats() {
     alert("当前筛选条件下没有可导出的酒店统计。");
     return;
   }
-  const rows = [["酒店", ...dates]];
-  hotels.forEach((hotel) => {
-    rows.push([hotel, ...dates.map((date) => roomTypeExportText(needStaysOnDate(date, hotel, selectedIdentity)))]);
+  const data = hotels.map((hotel) => ({
+    label: hotel,
+    byDate: dates.map((date) => needStaysOnDate(date, hotel, selectedIdentity))
+  }));
+  const roomTypes = statsExportRoomTypes(data.flatMap((row) => row.byDate));
+  const rows = statsExportHeaderRows("酒店", dates, roomTypes);
+  data.forEach((row) => {
+    rows.push([row.label, ...row.byDate.flatMap((needs) => statsExportCells(needs, roomTypes))]);
   });
   downloadStyledTable(`酒店统计当前信息-${dateToValue(new Date())}.xls`, rows);
 }
@@ -611,9 +644,14 @@ function exportRoleStats() {
     alert("当前筛选条件下没有可导出的角色统计。");
     return;
   }
-  const rows = [["人员性质", ...dates]];
-  identities.forEach((identity) => {
-    rows.push([identity, ...dates.map((date) => roomTypeExportText(roleNeedsOnDate(date, identity, selectedHotel)))]);
+  const data = identities.map((identity) => ({
+    label: identity,
+    byDate: dates.map((date) => roleNeedsOnDate(date, identity, selectedHotel))
+  }));
+  const roomTypes = statsExportRoomTypes(data.flatMap((row) => row.byDate));
+  const rows = statsExportHeaderRows("人员性质", dates, roomTypes);
+  data.forEach((row) => {
+    rows.push([row.label, ...row.byDate.flatMap((needs) => statsExportCells(needs, roomTypes))]);
   });
   downloadStyledTable(`角色统计当前信息-${dateToValue(new Date())}.xls`, rows);
 }
