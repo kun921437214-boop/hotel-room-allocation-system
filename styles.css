@@ -459,6 +459,14 @@ label.file-btn {
   align-self: end;
 }
 
+.stats-export-btn {
+  align-self: end;
+  height: 43px;
+  min-height: 43px;
+  min-width: 136px;
+  padding: 0 14px;
+}
+
 label {
   color: var(--muted);
   font-size: 13px;
