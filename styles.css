@@ -647,12 +647,32 @@ td .row-actions {
   white-space: nowrap;
 }
 
+.assigned-booking-line {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  line-height: 1.45;
+  min-width: 250px;
+  white-space: nowrap;
+}
+
+.assigned-booking-line + .assigned-booking-line {
+  margin-top: 4px;
+}
+
 .mini-btn {
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #fff;
   padding: 5px 8px;
   font-size: 12px;
+}
+
+.danger-mini-btn {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: #fecaca;
 }
 
 .room-cards {

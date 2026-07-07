@@ -856,6 +856,7 @@ function table(headers, rows, rowActions) {
 }
 
 function formatCell(value, header) {
+  if (header.html) return value || "";
   if (header.pill) {
     const cls = value === "未分配" || value === "异常" ? "pill-problem" : value === "已分配" || value === "否" ? "pill-assigned" : "pill-confirmed";
     return `<span class="pill ${cls}">${value || ""}</span>`;
@@ -866,10 +867,25 @@ function formatCell(value, header) {
   return value ?? "";
 }
 
+function refreshNeedAssignmentStatus(need) {
+  if (!need || need.status === "已取消") return;
+  const activeBookings = state.bookings.filter((booking) => booking.needId === need.id && booking.status !== "取消");
+  if (!activeBookings.length) {
+    need.status = "未分配";
+    return;
+  }
+  need.status = unmetRangesForNeed(need).length ? "部分分配" : "已分配";
+}
+
 function assignmentSummaryForNeed(needId) {
   const bookings = state.bookings.filter((booking) => booking.needId === needId && booking.status !== "取消");
   return {
-    assignedRoomTime: bookings.map((booking) => `${roomLabel(booking.roomId)}｜${booking.checkIn} 至 ${booking.checkOut}`).join("\n")
+    assignedRoomTime: bookings.map((booking) => `
+      <div class="assigned-booking-line">
+        <span>${roomLabel(booking.roomId)}｜${booking.checkIn} 至 ${booking.checkOut}</span>
+        <button class="mini-btn danger-mini-btn" type="button" data-delete-booking="${booking.id}">删除</button>
+      </div>
+    `).join("")
   };
 }
 
@@ -885,7 +901,7 @@ function renderNeeds() {
     { key: "people", label: "人数" },
     { key: "checkIn", label: "入住" },
     { key: "checkOut", label: "离店" },
-    { key: "assignedRoomTime", label: "已分配房间/时间", multiline: true },
+    { key: "assignedRoomTime", label: "已分配房间/时间", html: true },
     { key: "roomType", label: "期望房型" },
     { key: "status", label: "状态", pill: true },
     { key: "owner", label: "负责人" },
@@ -1127,7 +1143,7 @@ function bindEvents() {
       note: $("#assignNote").value.trim()
     };
     state.bookings.push(booking);
-    need.status = unmetRangesForNeed(need).length ? "部分分配" : "已分配";
+    refreshNeedAssignmentStatus(need);
     saveState();
     $("#assignNote").value = "";
     render();
@@ -1247,6 +1263,18 @@ function bindEvents() {
     const roomBtn = event.target.closest("[data-edit-room]");
     const changeBtn = event.target.closest("[data-edit-change]");
     const checkBtn = event.target.closest("[data-toggle-checkin]");
+    const deleteBookingBtn = event.target.closest("[data-delete-booking]");
+    if (deleteBookingBtn) {
+      const booking = state.bookings.find((item) => item.id === deleteBookingBtn.dataset.deleteBooking);
+      if (!booking) return;
+      const need = needById(booking.needId);
+      if (!confirm(`确定删除 ${need?.name || "该对象"} 的这条分房记录吗？删除后会回到分房页面待安排。`)) return;
+      state.bookings = state.bookings.filter((item) => item.id !== booking.id);
+      refreshNeedAssignmentStatus(need);
+      saveState();
+      render();
+      return;
+    }
     if (needBtn) {
       const need = needById(needBtn.dataset.editNeed);
       openDialog("编辑入住需求", needFields(), need, (values) => Object.assign(need, values, { people: Number(values.people) || 1 }));
