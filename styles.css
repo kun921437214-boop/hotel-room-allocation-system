@@ -616,7 +616,7 @@ textarea {
 table {
   border-collapse: collapse;
   width: 100%;
-  min-width: 980px;
+  min-width: 1120px;
 }
 
 th,
@@ -647,7 +647,7 @@ td .row-actions {
   white-space: nowrap;
 }
 
-.people-info-cell,
+.people-stack-cell,
 .stay-time-cell {
   display: flex;
   flex-direction: column;
@@ -656,7 +656,7 @@ td .row-actions {
   min-height: 42px;
 }
 
-.person-info-line,
+.people-stack-line,
 .stay-time-cell div {
   align-items: center;
   display: flex;
@@ -664,7 +664,6 @@ td .row-actions {
   line-height: 1.45;
 }
 
-.person-info-line span,
 .stay-time-cell span {
   background: var(--gray-soft);
   border-radius: 5px;
@@ -675,7 +674,7 @@ td .row-actions {
   padding: 1px 5px;
 }
 
-.person-info-line strong,
+.people-stack-line,
 .stay-time-cell strong {
   font-weight: 600;
 }

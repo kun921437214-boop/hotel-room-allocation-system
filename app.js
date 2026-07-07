@@ -938,18 +938,15 @@ function companionSummary(companions) {
   return companions.map((person) => person.name || person.phone || "未命名").join("、");
 }
 
-function personInfoLine(person, label = "") {
-  const parts = [person.name, person.gender, person.phone, person.idNo].filter(Boolean).map(escapeHtml);
-  const text = parts.length ? parts.join("｜") : "未填写人员信息";
-  return `<div class="person-info-line">${label ? `<span>${escapeHtml(label)}</span>` : ""}<strong>${text}</strong></div>`;
+function peopleForNeed(need) {
+  const companions = Array.isArray(need.companions) ? need.companions : [];
+  return [need, ...companions];
 }
 
-function peopleInfoCell(need) {
-  const companions = Array.isArray(need.companions) ? need.companions : [];
+function peopleFieldCell(need, key) {
   return `
-    <div class="people-info-cell">
-      ${personInfoLine(need, "主")}
-      ${companions.map((person, index) => personInfoLine(person, `增${index + 1}`)).join("")}
+    <div class="people-stack-cell">
+      ${peopleForNeed(need).map((person) => `<div class="people-stack-line">${escapeHtml(person[key] || "-")}</div>`).join("")}
     </div>
   `;
 }
@@ -969,13 +966,19 @@ function renderNeeds() {
     .map((need, index) => ({
       ...need,
       sequence: index + 1,
-      peopleInfo: peopleInfoCell(need),
+      nameList: peopleFieldCell(need, "name"),
+      genderList: peopleFieldCell(need, "gender"),
+      phoneList: peopleFieldCell(need, "phone"),
+      idNoList: peopleFieldCell(need, "idNo"),
       stayTime: stayTimeCell(need)
     }));
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，未分配 ${rows.filter((item) => item.status === "未分配").length} 条`;
   $("#needsTable").innerHTML = table([
     { key: "sequence", label: "序号" },
-    { key: "peopleInfo", label: "人员信息", html: true },
+    { key: "nameList", label: "姓名", html: true },
+    { key: "genderList", label: "性别", html: true },
+    { key: "phoneList", label: "电话", html: true },
+    { key: "idNoList", label: "身份证号", html: true },
     { key: "identity", label: "人员性质" },
     { key: "stayTime", label: "入住时间", html: true },
     { key: "hotel", label: "安排酒店" },
