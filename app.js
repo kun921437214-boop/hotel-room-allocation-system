@@ -890,6 +890,11 @@ function assignmentSummaryForNeed(needId) {
   };
 }
 
+function companionSummary(companions) {
+  if (!Array.isArray(companions) || !companions.length) return "";
+  return companions.map((person) => person.name || person.phone || "未命名").join("、");
+}
+
 function renderNeeds() {
   const rows = state.needs
     .map((need) => ({ ...need, ...assignmentSummaryForNeed(need.id) }))
@@ -901,6 +906,7 @@ function renderNeeds() {
     { key: "gender", label: "性别" },
     { key: "phone", label: "电话" },
     { key: "idNo", label: "身份证号" },
+    { key: "companionText", label: "增加人员" },
     { key: "identity", label: "人员性质" },
     { key: "checkIn", label: "入住" },
     { key: "checkOut", label: "离店" },
@@ -909,7 +915,7 @@ function renderNeeds() {
     { key: "assignedRoomTime", label: "已分配房间/时间", html: true },
     { key: "status", label: "状态", pill: true },
     { key: "note", label: "备注" }
-  ], rows, (row) => `<button class="mini-btn" data-edit-need="${row.id}">编辑</button>`);
+  ], rows.map((row) => ({ ...row, companionText: companionSummary(row.companions) })), (row) => `<button class="mini-btn" data-edit-need="${row.id}">编辑</button>`);
 }
 
 function renderRooms() {
@@ -1044,6 +1050,17 @@ function openDialog(title, fields, initial, onSave) {
         </div>
       `;
     }
+    if (field.type === "peopleRepeater") {
+      const companions = Array.isArray(initial[field.key]) ? initial[field.key] : [];
+      return `
+        <div class="full companion-editor" data-companion-editor>
+          <button class="ghost-btn add-person-btn" type="button" data-add-companion>增加人员</button>
+          <div class="companion-list" data-companion-list>
+            ${companions.map((person) => companionCard(person)).join("")}
+          </div>
+        </div>
+      `;
+    }
     if (field.type === "select") {
       return `<label class="${full}">${field.label}<select name="${field.key}">${field.options.map((option) => `<option value="${escapeHtml(option)}" ${option === value ? "selected" : ""}>${option || "未安排"}</option>`).join("")}</select></label>`;
     }
@@ -1055,18 +1072,56 @@ function openDialog(title, fields, initial, onSave) {
   $("#editDialog").showModal();
 }
 
+function companionCard(person = {}) {
+  const gender = person.gender || "男";
+  const identity = person.identity || "工作人员";
+  return `
+    <div class="companion-card" data-companion-card>
+      <div class="companion-card-head">
+        <strong>人员信息</strong>
+        <button class="mini-btn" type="button" data-remove-companion>删除</button>
+      </div>
+      <label>姓名<input data-companion-key="name" value="${escapeHtml(person.name || "")}"></label>
+      <label>性别
+        <select data-companion-key="gender">
+          ${["男", "女"].map((option) => `<option value="${option}" ${option === gender ? "selected" : ""}>${option}</option>`).join("")}
+        </select>
+      </label>
+      <label>电话<input data-companion-key="phone" value="${escapeHtml(person.phone || "")}"></label>
+      <label>身份证号<input data-companion-key="idNo" value="${escapeHtml(person.idNo || "")}"></label>
+      <label>人员性质
+        <select data-companion-key="identity">
+          ${identityOptions.map((option) => `<option value="${option}" ${option === identity ? "selected" : ""}>${option}</option>`).join("")}
+        </select>
+      </label>
+    </div>
+  `;
+}
+
 function dialogValues() {
   const data = {};
   new FormData($("#dialogForm")).forEach((value, key) => {
     data[key] = value;
   });
+  const companionEditor = $("#dialogForm [data-companion-editor]");
+  if (companionEditor) {
+    data.companions = Array.from(companionEditor.querySelectorAll("[data-companion-card]")).map((card) => {
+      const person = {};
+      card.querySelectorAll("[data-companion-key]").forEach((input) => {
+        person[input.dataset.companionKey] = input.value.trim();
+      });
+      return person;
+    }).filter((person) => person.name || person.phone || person.idNo);
+  }
   return data;
 }
 
 function normalizeNeedValues(values) {
-  const people = Number(values.people) || 1;
+  const companions = Array.isArray(values.companions) ? values.companions : [];
+  const people = 1 + companions.length;
   return {
     ...values,
+    companions,
     people,
     adults: people,
     status: values.hotel ? "已分配" : "未分配"
@@ -1080,11 +1135,12 @@ function needFields() {
     { key: "phone", label: "电话" },
     { key: "idNo", label: "身份证号" },
     { key: "identity", label: "人员性质", type: "select", options: identityOptions },
-    { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
     { key: "people", type: "hidden", default: 1 },
     { key: "status", type: "hidden", default: "未分配" },
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
     { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
+    { key: "companions", type: "peopleRepeater" },
+    { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
     { key: "note", label: "备注", type: "textarea" }
   ];
 }
@@ -1224,6 +1280,8 @@ function bindEvents() {
     const rangeApply = event.target.closest("[data-range-apply]");
     const rangeMonthNav = event.target.closest("[data-range-month-nav]");
     const rangeDay = event.target.closest("[data-range-day]");
+    const addCompanionBtn = event.target.closest("[data-add-companion]");
+    const removeCompanionBtn = event.target.closest("[data-remove-companion]");
     if (rangeTrigger) {
       event.preventDefault();
       const picker = rangeTrigger.closest("[data-date-range]");
@@ -1274,6 +1332,16 @@ function bindEvents() {
       picker.querySelector("[data-range-panel]").hidden = true;
       if (picker.matches("[data-assignment-range]")) updateRoomOptions();
       if (picker.matches("[data-calendar-range]")) renderCalendar();
+      return;
+    }
+    if (addCompanionBtn) {
+      event.preventDefault();
+      addCompanionBtn.closest("[data-companion-editor]").querySelector("[data-companion-list]").insertAdjacentHTML("beforeend", companionCard());
+      return;
+    }
+    if (removeCompanionBtn) {
+      event.preventDefault();
+      removeCompanionBtn.closest("[data-companion-card]").remove();
       return;
     }
     const needBtn = event.target.closest("[data-edit-need]");

@@ -761,6 +761,41 @@ dialog::backdrop {
   font-weight: 700;
 }
 
+.companion-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.add-person-btn {
+  justify-self: start;
+}
+
+.companion-list {
+  display: grid;
+  gap: 10px;
+}
+
+.companion-card {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px 12px;
+  grid-template-columns: 1fr 1fr;
+  padding: 12px;
+}
+
+.companion-card-head {
+  align-items: center;
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: space-between;
+}
+
+.companion-card-head strong {
+  font-size: 14px;
+}
+
 .date-range-picker {
   position: relative;
   display: grid;
@@ -1200,6 +1235,10 @@ dialog::backdrop {
 
   .date-calendar {
     padding: 10px;
+  }
+
+  .companion-card {
+    grid-template-columns: 1fr;
   }
 
   .date-day {
