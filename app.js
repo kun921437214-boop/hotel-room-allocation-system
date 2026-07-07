@@ -970,6 +970,7 @@ function renderNeeds() {
       genderList: peopleFieldCell(need, "gender"),
       phoneList: peopleFieldCell(need, "phone"),
       idNoList: peopleFieldCell(need, "idNo"),
+      identityList: peopleFieldCell(need, "identity"),
       stayTime: stayTimeCell(need)
     }));
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，未分配 ${rows.filter((item) => item.status === "未分配").length} 条`;
@@ -979,7 +980,7 @@ function renderNeeds() {
     { key: "genderList", label: "性别", html: true },
     { key: "phoneList", label: "电话", html: true },
     { key: "idNoList", label: "身份证号", html: true },
-    { key: "identity", label: "人员性质" },
+    { key: "identityList", label: "人员性质", html: true },
     { key: "stayTime", label: "入住时间", html: true },
     { key: "hotel", label: "安排酒店" },
     { key: "roomType", label: "房间类型" },
