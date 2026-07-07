@@ -20,9 +20,7 @@
         <nav class="nav" aria-label="主要视图">
           <button class="nav-item active" data-view="dashboard">总览</button>
           <button class="nav-item" data-view="calendar">房晚日历</button>
-          <button class="nav-item" data-view="assign">分房</button>
           <button class="nav-item" data-view="needs">入住需求</button>
-          <button class="nav-item" data-view="rooms">酒店房间</button>
         </nav>
       </aside>
 
@@ -126,89 +124,6 @@
           <div class="board" id="roomBoard"></div>
         </section>
 
-        <section class="view" id="assignView" aria-labelledby="viewTitle">
-          <div class="split">
-            <section class="panel">
-              <div class="panel-header">
-                <div>
-                  <h3>新增分房</h3>
-                  <p>选择需求、日期和房间，系统会做重复占用检查。</p>
-                </div>
-              </div>
-              <form class="form" id="assignForm">
-                <label>入住需求
-                  <select id="needSelect" required></select>
-                </label>
-                <div class="dialog-field assign-date-range">
-                  <span class="dialog-field-label">入住时间</span>
-                  <div class="date-range-picker" data-date-range data-assignment-range>
-                    <input id="checkInInput" type="hidden" required data-range-hidden-start>
-                    <input id="checkOutInput" type="hidden" required data-range-hidden-end>
-                    <button class="date-range-trigger" type="button" data-range-trigger>
-                      <span data-range-summary>开始日期 至 结束日期</span>
-                      <span class="date-range-calendar-icon" aria-hidden="true"></span>
-                    </button>
-                    <div class="date-range-panel" data-range-panel hidden>
-                      <input type="hidden" data-range-start>
-                      <input type="hidden" data-range-end>
-                      <div class="date-range-body">
-                        <section class="date-calendar">
-                          <div class="date-calendar-head">
-                            <button type="button" data-range-month-nav="-12">«</button>
-                            <button type="button" data-range-month-nav="-1">‹</button>
-                            <strong data-range-month-title></strong>
-                            <button type="button" data-range-month-nav="1">›</button>
-                            <button type="button" data-range-month-nav="12">»</button>
-                          </div>
-                          <div class="date-week-row">
-                            <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
-                          </div>
-                          <div class="date-grid" data-range-calendar></div>
-                        </section>
-                      </div>
-                      <div class="date-range-footer">
-                        <span data-range-draft>请选择开始日期和结束日期</span>
-                        <button class="primary-btn" type="button" data-range-apply>确认</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <label>可选房间
-                  <select id="roomSelect" required></select>
-                </label>
-                <label>分配用途
-                  <select id="purposeInput">
-                    <option>工作人员</option>
-                    <option>导师</option>
-                    <option>嘉宾</option>
-                    <option>选手家庭</option>
-                    <option>合作方</option>
-                    <option>领导</option>
-                    <option>志愿者</option>
-                    <option>备用</option>
-                    <option>自己人</option>
-                    <option>其他</option>
-                  </select>
-                </label>
-                <label>备注
-                  <textarea id="assignNote" rows="3" placeholder="例如：需无烟、近电梯、晚到保房"></textarea>
-                </label>
-                <div id="conflictBox" class="conflict-box"></div>
-                <button class="primary-btn" type="submit">创建分配</button>
-              </form>
-            </section>
-            <section class="panel">
-              <div class="panel-header">
-                <div>
-                  <h3>最近分配</h3>
-                  <p>按创建顺序展示最新操作。</p>
-                </div>
-              </div>
-              <div class="assignment-list" id="assignmentList"></div>
-            </section>
-          </div>
-        </section>
-
         <section class="view" id="needsView" aria-labelledby="viewTitle">
           <div class="table-actions">
             <button class="primary-btn" id="addNeedBtn" type="button">新增需求</button>
@@ -222,19 +137,6 @@
           <div class="table-wrap">
             <table id="needsTable"></table>
           </div>
-        </section>
-
-        <section class="view" id="roomsView" aria-labelledby="viewTitle">
-          <div class="table-actions">
-            <button class="primary-btn" id="addRoomBtn" type="button">新增房间</button>
-            <button class="ghost-btn" id="downloadRoomTemplateBtn" type="button">下载上传模板</button>
-            <label class="ghost-btn file-btn">
-              批量新增房间
-              <input id="roomBatchInput" type="file" accept=".csv,.xls,.html,text/csv,application/vnd.ms-excel">
-            </label>
-            <span id="roomsSummary"></span>
-          </div>
-          <div class="room-cards" id="roomCards"></div>
         </section>
 
         <section class="view" id="onsiteView" aria-labelledby="viewTitle">

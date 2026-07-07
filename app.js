@@ -560,13 +560,13 @@ function setView(view) {
   activeView = view;
   $$(".nav-item").forEach((btn) => btn.classList.toggle("active", btn.dataset.view === view));
   $$(".view").forEach((section) => section.classList.remove("active"));
-  $(`#${view}View`).classList.add("active");
+  const targetView = $(`#${view}View`);
+  if (!targetView) return;
+  targetView.classList.add("active");
   const titles = {
     dashboard: "总览",
     calendar: "房晚日历",
-    assign: "分房",
     needs: "入住需求",
-    rooms: "酒店房间",
     onsite: "现场核对",
     changes: "变更记录"
   };
@@ -606,7 +606,7 @@ function renderHeatmap() {
   const dates = activeDates();
   if (!state.hotels.length) {
     $("#heatmap").style.gridTemplateColumns = "1fr";
-    $("#heatmap").innerHTML = `<div class="heat-cell header">暂无酒店和房间数据，请先到“酒店房间”新增房间。</div>`;
+    $("#heatmap").innerHTML = `<div class="heat-cell header">暂无酒店住宿数据，请先维护入住需求。</div>`;
     return;
   }
   const header = [`<div class="heat-cell header sticky-col">酒店</div>`, ...dates.map((date) => `<div class="heat-cell header">${date.slice(5)}</div>`)];
@@ -654,7 +654,7 @@ function renderUseBars() {
     counts[booking.purpose] = (counts[booking.purpose] || 0) + nightsBetween(booking.checkIn, booking.checkOut).length;
   });
   if (!Object.keys(counts).length) {
-    $("#useBars").innerHTML = `<div class="task"><strong>暂无分配数据</strong><span>创建分房后，这里会显示用途分布。</span></div>`;
+    $("#useBars").innerHTML = `<div class="task"><strong>暂无安排数据</strong><span>有住宿安排后，这里会显示用途分布。</span></div>`;
     return;
   }
   const max = Math.max(1, ...Object.values(counts));
@@ -796,7 +796,7 @@ function updateConflictBox() {
   const box = $("#conflictBox");
   if (!roomId || !checkIn || !checkOut) {
     box.className = "conflict-box";
-    box.textContent = "请先维护入住需求、酒店房间和日期。";
+    box.textContent = "请先维护入住需求和日期。";
     return;
   }
   if (checkIn >= checkOut) {
@@ -826,7 +826,7 @@ function renderAssignments() {
     .slice()
     .reverse();
   if (!rows.length) {
-    $("#assignmentList").innerHTML = `<div class="assignment"><strong>暂无分房记录</strong><span>创建分房后会显示在这里。</span></div>`;
+    $("#assignmentList").innerHTML = `<div class="assignment"><strong>暂无安排记录</strong><span>创建安排后会显示在这里。</span></div>`;
     return;
   }
   $("#assignmentList").innerHTML = rows.map((booking) => {
@@ -985,12 +985,7 @@ function render() {
     renderUseBars();
   }
   if (activeView === "calendar") renderCalendar();
-  if (activeView === "assign") {
-    populateAssignmentForm();
-    renderAssignments();
-  }
   if (activeView === "needs") renderNeeds();
-  if (activeView === "rooms") renderRooms();
   if (activeView === "onsite") renderOnsite();
   if (activeView === "changes") renderChanges();
 }
@@ -1108,16 +1103,16 @@ function bindEvents() {
   $("#onsiteDate").addEventListener("change", renderOnsite);
   $("#onsiteHotel").addEventListener("change", renderOnsite);
 
-  $("#needSelect").addEventListener("change", () => {
+  $("#needSelect")?.addEventListener("change", () => {
     syncAssignmentDatesFromNeed();
     updateRoomOptions();
   });
   ["checkInInput", "checkOutInput"].forEach((id) => {
-    $(`#${id}`).addEventListener("change", updateRoomOptions);
+    $(`#${id}`)?.addEventListener("change", updateRoomOptions);
   });
-  $("#roomSelect").addEventListener("change", updateConflictBox);
+  $("#roomSelect")?.addEventListener("change", updateConflictBox);
 
-  $("#assignForm").addEventListener("submit", (event) => {
+  $("#assignForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const roomId = $("#roomSelect").value;
     const need = selectedAssignmentNeed();
@@ -1169,7 +1164,7 @@ function bindEvents() {
     event.target.value = "";
   });
 
-  $("#addRoomBtn").addEventListener("click", () => {
+  $("#addRoomBtn")?.addEventListener("click", () => {
     openDialog("新增房间", roomFields(), {
       hotel: state.hotels[0]?.name || "",
       floor: 1,
@@ -1183,8 +1178,8 @@ function bindEvents() {
       addDatesToEventRange(roomAvailableDates(values));
     });
   });
-  $("#downloadRoomTemplateBtn").addEventListener("click", downloadRoomTemplate);
-  $("#roomBatchInput").addEventListener("change", async (event) => {
+  $("#downloadRoomTemplateBtn")?.addEventListener("click", downloadRoomTemplate);
+  $("#roomBatchInput")?.addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (!file) return;
     await importRoomBatch(file);
@@ -1268,7 +1263,7 @@ function bindEvents() {
       const booking = state.bookings.find((item) => item.id === deleteBookingBtn.dataset.deleteBooking);
       if (!booking) return;
       const need = needById(booking.needId);
-      if (!confirm(`确定删除 ${need?.name || "该对象"} 的这条分房记录吗？删除后会回到分房页面待安排。`)) return;
+      if (!confirm(`确定删除 ${need?.name || "该对象"} 的这条安排记录吗？删除后会重新进入待安排状态。`)) return;
       state.bookings = state.bookings.filter((item) => item.id !== booking.id);
       refreshNeedAssignmentStatus(need);
       saveState();
