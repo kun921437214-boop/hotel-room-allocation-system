@@ -533,6 +533,11 @@ function needHotels() {
   return Array.from(names);
 }
 
+function roomCapacityHotels() {
+  const names = new Set([...arrangementHotelOptions, ...Object.keys(roomCapacityTotals), ...needHotels()]);
+  return Array.from(names).filter(Boolean);
+}
+
 function personIdentity(person, fallback = "") {
   return person?.identity || fallback || "其他";
 }
@@ -577,6 +582,17 @@ function roleNeedsOnDate(date, identity = "all", hotel = "all") {
   ));
 }
 
+function roomBalanceNeedsOnDate(date, hotel = "all") {
+  return visibleNeeds().filter((need) => (
+    need.checkIn &&
+    need.checkOut &&
+    date >= need.checkIn &&
+    date < need.checkOut &&
+    needMatchesHotel(need, hotel) &&
+    filteredText(need).includes(getSearch())
+  ));
+}
+
 function needTypeCounts(needs) {
   return needs.reduce((counts, need) => {
     const type = normalizedRoomType(need.roomType);
@@ -616,6 +632,30 @@ function roomTypeCountLines(needs) {
   return visibleTypes.map((type) => (
     `<div class="room-type-count-line ${roomTypeCountClass(type)}">${escapeHtml(type)}：${counts[type] || 0}间</div>`
   )).join("");
+}
+
+function roomCapacityTotal(hotel, date, type) {
+  const normalizedHotel = normalizedNeedHotel(hotel);
+  const normalizedType = normalizedRoomType(type);
+  return Number(roomCapacityTotals[normalizedHotel]?.[date]?.[normalizedType] || 0);
+}
+
+function roomBalanceInfo(date, hotel, type) {
+  const counts = needTypeCounts(roomBalanceNeedsOnDate(date, hotel));
+  const used = counts[normalizedRoomType(type)] || 0;
+  const total = roomCapacityTotal(hotel, date, type);
+  return { used, total, remaining: total - used };
+}
+
+function roomBalanceCountLines(date, hotel) {
+  const counts = needTypeCounts(roomBalanceNeedsOnDate(date, hotel));
+  const extraTypes = Object.keys(counts).filter((type) => !roomTypeOptions.includes(type));
+  const visibleTypes = [...roomTypeOptions, ...extraTypes].filter((type) => roomCapacityTotal(hotel, date, type) > 0 || (counts[type] || 0) > 0);
+  if (!visibleTypes.length) return `<div class="room-type-count-line room-type-empty">暂无</div>`;
+  return visibleTypes.map((type) => {
+    const { remaining, total } = roomBalanceInfo(date, hotel, type);
+    return `<div class="room-type-count-line ${roomTypeCountClass(type)}">${escapeHtml(type)}：${remaining}/${total}</div>`;
+  }).join("");
 }
 
 function hotelRoomCountOnDate(date, hotel) {
@@ -863,6 +903,24 @@ const needBatchHeaders = ["序号", "姓名", "性别", "电话", "身份证号"
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const arrangementHotelOptions = ["诺富特", "宜必思", "施柏阁", "大观"];
 const defaultHotelInfoRange = { start: "2026-07-29", end: "2026-08-06" };
+const roomCapacityDates = [
+  "2026-07-29",
+  "2026-07-30",
+  "2026-07-31",
+  "2026-08-01",
+  "2026-08-02",
+  "2026-08-03",
+  "2026-08-04",
+  "2026-08-05",
+  "2026-08-06"
+];
+const roomCapacityTotals = Object.fromEntries(arrangementHotelOptions.map((hotel) => [
+  hotel,
+  Object.fromEntries(roomCapacityDates.map((date) => [
+    date,
+    { "双标": 100, "大床": 100, "套房": 100 }
+  ]))
+]));
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -1168,6 +1226,50 @@ function exportRoleStats() {
     });
   }
   downloadStyledWorkbook(`角色统计当前信息-${dateToValue(new Date())}.xls`, sheets);
+}
+
+function roomBalanceExportRoomTypes(hotels, dates) {
+  const usedTypes = hotels.flatMap((hotel) => dates.flatMap((date) => Object.keys(needTypeCounts(roomBalanceNeedsOnDate(date, hotel)))));
+  const capacityTypes = hotels.flatMap((hotel) => dates.flatMap((date) => Object.keys(roomCapacityTotals[normalizedNeedHotel(hotel)]?.[date] || {})));
+  const extraTypes = Array.from(new Set([...usedTypes, ...capacityTypes].filter((type) => !roomTypeOptions.includes(type))));
+  return [...roomTypeOptions, ...extraTypes];
+}
+
+function buildRoomBalanceExportRows(hotels, dates) {
+  const roomTypes = roomBalanceExportRoomTypes(hotels, dates);
+  const columnTotals = dates.flatMap(() => roomTypes.map(() => 0));
+  const rows = statsExportHeaderRows("酒店", dates, roomTypes);
+  hotels.forEach((hotel) => {
+    let rowTotal = 0;
+    const cells = dates.flatMap((date, dateIndex) => roomTypes.map((type, typeIndex) => {
+      const { remaining, total, used } = roomBalanceInfo(date, hotel, type);
+      if (total <= 0 && used <= 0) return "";
+      columnTotals[dateIndex * roomTypes.length + typeIndex] += remaining;
+      rowTotal += remaining;
+      return { value: remaining, number: true };
+    }));
+    rows.push([hotel, ...cells, { value: rowTotal, number: true }]);
+  });
+  rows.push([
+    { value: "总计", header: true },
+    ...columnTotals.map((count) => ({ value: count, number: true })),
+    { value: columnTotals.reduce((sum, count) => sum + count, 0), number: true }
+  ]);
+  return rows;
+}
+
+function exportRoomBalance() {
+  const selectedHotel = $("#balanceHotel").value || "all";
+  const dates = dateRangeValues("#balanceStartInput", "#balanceEndInput");
+  const hotels = roomCapacityHotels().filter((hotel) => selectedHotel === "all" || hotel === selectedHotel);
+  if (!dates.length || !hotels.length) {
+    alert("当前筛选条件下没有可导出的房间余量。");
+    return;
+  }
+  downloadStyledWorkbook(`房间余量当前信息-${dateToValue(new Date())}.xls`, [{
+    name: selectedHotel === "all" ? "全部" : selectedHotel,
+    rows: buildRoomBalanceExportRows(hotels, dates)
+  }]);
 }
 
 function parseCsv(text) {
@@ -1651,6 +1753,7 @@ function setView(view) {
     dashboard: "总览",
     calendar: "酒店统计",
     roleStats: "角色统计",
+    roomBalance: "房间余量",
     needs: "入住需求",
     onsite: "现场核对",
     changes: "变更记录"
@@ -1765,10 +1868,12 @@ function setSelectOptions(selector, optionsHtml, fallback = "all") {
 
 function populateFilters() {
   const hotelOptions = [optionHtml("all", "全部酒店"), ...needHotels().map((hotel) => optionHtml(hotel))].join("");
+  const balanceHotelOptions = [optionHtml("all", "全部酒店"), ...roomCapacityHotels().map((hotel) => optionHtml(hotel))].join("");
   const roleOptions = [optionHtml("all", "全部人员性质"), ...roleIdentities().map((identity) => optionHtml(identity))].join("");
   const dateOptions = activeDates().map((date) => `<option value="${date}">${date}</option>`).join("");
   setSelectOptions("#calendarIdentity", roleOptions);
   setSelectOptions("#roleHotel", hotelOptions);
+  setSelectOptions("#balanceHotel", balanceHotelOptions);
   setSelectOptions("#onsiteHotel", hotelOptions);
   setSelectOptions("#needHotelFilter", hotelOptions);
   setSelectOptions("#needIdentityFilter", roleOptions);
@@ -1780,6 +1885,9 @@ function populateFilters() {
   if (!$("#roleStartInput").value) $("#roleStartInput").value = defaultHotelInfoRange.start;
   if (!$("#roleEndInput").value) $("#roleEndInput").value = defaultHotelInfoRange.end;
   refreshDateRangePicker(document.querySelector("[data-role-range]"));
+  if ($("#balanceStartInput") && !$("#balanceStartInput").value) $("#balanceStartInput").value = defaultHotelInfoRange.start;
+  if ($("#balanceEndInput") && !$("#balanceEndInput").value) $("#balanceEndInput").value = defaultHotelInfoRange.end;
+  refreshDateRangePicker(document.querySelector("[data-balance-range]"));
   if ($("#onsiteDate") && !$("#onsiteDate").value) $("#onsiteDate").value = activeDates()[0];
 }
 
@@ -1839,6 +1947,32 @@ function renderRoleStats() {
     })
   ]);
   $("#roleStatsBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 136px repeat(${dates.length}, minmax(124px, 1fr))">${[...header, ...rows].join("")}</div>`;
+}
+
+function renderRoomBalance() {
+  const selectedHotel = $("#balanceHotel").value || "all";
+  const checkIn = $("#balanceStartInput").value || defaultHotelInfoRange.start;
+  const checkOut = $("#balanceEndInput").value || defaultHotelInfoRange.end;
+  const dates = checkIn <= checkOut ? nightsBetween(checkIn, addDays(checkOut, 1)) : [];
+  const hotels = roomCapacityHotels().filter((hotel) => selectedHotel === "all" || hotel === selectedHotel);
+  if (!dates.length) {
+    $("#roomBalanceBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
+    return;
+  }
+  if (!hotels.length) {
+    $("#roomBalanceBoard").innerHTML = `<div class="board-cell header">当前筛选条件下暂无酒店总量。</div>`;
+    return;
+  }
+  const header = [`<div class="board-cell header">酒店</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
+  const rows = hotels.flatMap((hotel) => [
+    `<div class="board-cell room-name">${hotel}<small>剩余 / 总共</small></div>`,
+    ...dates.map((date) => `
+      <div class="board-cell hotel-info-cell">
+        <div class="room-type-counts">${roomBalanceCountLines(date, hotel)}</div>
+      </div>
+    `)
+  ]);
+  $("#roomBalanceBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 136px repeat(${dates.length}, minmax(124px, 1fr))">${[...header, ...rows].join("")}</div>`;
 }
 
 function populateAssignmentForm() {
@@ -2145,6 +2279,7 @@ function render() {
   }
   if (activeView === "calendar") renderCalendar();
   if (activeView === "roleStats") renderRoleStats();
+  if (activeView === "roomBalance") renderRoomBalance();
   if (activeView === "needs") renderNeeds();
   if (activeView === "onsite") renderOnsite();
   if (activeView === "changes") renderChanges();
@@ -2333,6 +2468,8 @@ function bindEvents() {
   $("#exportHotelStatsBtn")?.addEventListener("click", exportHotelStats);
   $("#roleHotel").addEventListener("change", renderRoleStats);
   $("#exportRoleStatsBtn")?.addEventListener("click", exportRoleStats);
+  $("#balanceHotel")?.addEventListener("change", renderRoomBalance);
+  $("#exportRoomBalanceBtn")?.addEventListener("click", exportRoomBalance);
   $("#onsiteDate")?.addEventListener("change", renderOnsite);
   $("#onsiteHotel")?.addEventListener("change", renderOnsite);
 
@@ -2493,6 +2630,7 @@ function bindEvents() {
       if (picker.matches("[data-assignment-range]")) updateRoomOptions();
       if (picker.matches("[data-calendar-range]")) renderCalendar();
       if (picker.matches("[data-role-range]")) renderRoleStats();
+      if (picker.matches("[data-balance-range]")) renderRoomBalance();
       return;
     }
     if (rangeClear) {
