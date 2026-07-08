@@ -82,12 +82,29 @@ async function feishu(method, path, payload) {
   return body.data || {};
 }
 
+function pagedPath(path, pageSize, pageToken = "") {
+  const params = [`page_size=${pageSize}`];
+  if (pageToken) params.push(`page_token=${encodeURIComponent(pageToken)}`);
+  return `${path}${path.includes("?") ? "&" : "?"}${params.join("&")}`;
+}
+
+async function feishuItems(path, pageSize = 100) {
+  const items = [];
+  let pageToken = "";
+  do {
+    const data = await feishu("GET", pagedPath(path, pageSize, pageToken));
+    items.push(...(data.items || []));
+    pageToken = data.has_more ? data.page_token || "" : "";
+  } while (pageToken);
+  return items;
+}
+
 async function ensureSyncTableId() {
   if (process.env.FEISHU_SYNC_TABLE_ID) return process.env.FEISHU_SYNC_TABLE_ID;
   if (tableIdCache) return tableIdCache;
 
-  const tables = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables?page_size=100`);
-  const existing = (tables.items || []).find((table) => table.name === SYNC_TABLE_NAME);
+  const tables = await allTables();
+  const existing = tables.find((table) => table.name === SYNC_TABLE_NAME);
   if (existing?.table_id) {
     tableIdCache = existing.table_id;
     return tableIdCache;
@@ -111,8 +128,7 @@ async function ensureSyncTableId() {
 }
 
 async function allTables() {
-  const data = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables?page_size=100`);
-  return data.items || [];
+  return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables`, 100);
 }
 
 async function ensureReadableTable(tableName, fields) {
@@ -138,8 +154,7 @@ async function ensureReadableTable(tableName, fields) {
 }
 
 async function listFields(tableId) {
-  const data = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields?page_size=100`);
-  return data.items || [];
+  return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields`, 100);
 }
 
 async function ensureReadableFields(tableId, fields) {
@@ -172,8 +187,7 @@ async function deleteObsoleteReadableTables() {
 }
 
 async function listRecords(tableId) {
-  const data = await feishu("GET", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records?page_size=500`);
-  return data.items || [];
+  return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records`, 500);
 }
 
 async function upsertReadableRecords(tableId, keyField, rows) {
@@ -220,31 +234,6 @@ async function updateSyncRecord(tableId, recordId, state) {
     "最后更新时间": new Date().toISOString()
   };
   return feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${recordId}`, { fields });
-}
-
-function hotelName(state, id) {
-  return (state.hotels || []).find((hotel) => hotel.id === id || hotel.name === id)?.name || id || "";
-}
-
-function roomById(state, roomId) {
-  return (state.rooms || []).find((room) => room.id === roomId);
-}
-
-function needById(state, needId) {
-  return (state.needs || []).find((need) => need.id === needId);
-}
-
-function roomLabel(state, roomId) {
-  const room = roomById(state, roomId);
-  if (!room) return roomId || "";
-  return `${hotelName(state, room.hotel || room.hotelId)} ${room.roomNo}`;
-}
-
-function assignedRoomTime(state, needId) {
-  return (state.bookings || [])
-    .filter((booking) => booking.needId === needId && booking.status !== "取消")
-    .map((booking) => `${roomLabel(state, booking.roomId)}｜${booking.checkIn || ""} 至 ${booking.checkOut || ""}`)
-    .join("\n");
 }
 
 function dateToUtcValue(date) {
@@ -323,7 +312,7 @@ function needMatchesIdentity(need, identity) {
 }
 
 function needStaysOnDate(need, date) {
-  return need.status !== "已取消" && need.checkIn && need.checkOut && date >= need.checkIn && date < need.checkOut;
+  return need.checkIn && need.checkOut && date >= need.checkIn && date < need.checkOut;
 }
 
 function roomTypeCounts(needs) {

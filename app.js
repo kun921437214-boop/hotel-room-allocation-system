@@ -20,6 +20,7 @@ let editing = null;
 let remoteSyncReady = false;
 let saveTimer = null;
 let saveInFlight = false;
+let saveQueued = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -33,8 +34,6 @@ function defaultDate(offset = 0) {
 function activeDates() {
   const needDates = Array.from(new Set(state.needs.flatMap((need) => nightsBetween(need.checkIn, need.checkOut)))).sort();
   if (needDates.length) return needDates;
-  const roomDates = Array.from(new Set(state.rooms.flatMap((room) => roomAvailableDates(room)))).sort();
-  if (roomDates.length) return roomDates;
   return state.eventDates.length ? state.eventDates : [defaultDate()];
 }
 
@@ -110,12 +109,15 @@ async function loadRemoteState() {
 
 function scheduleRemoteSave() {
   if (!remoteSyncReady) return;
+  saveQueued = true;
   clearTimeout(saveTimer);
+  if (saveInFlight) return;
   saveTimer = setTimeout(syncStateToRemote, 450);
 }
 
 async function syncStateToRemote() {
-  if (!remoteSyncReady || saveInFlight) return;
+  if (!remoteSyncReady || saveInFlight || !saveQueued) return;
+  saveQueued = false;
   saveInFlight = true;
   setSyncStatus("正在保存共享数据");
   try {
@@ -132,6 +134,10 @@ async function syncStateToRemote() {
     setSyncStatus("保存失败，已保存在本机", "bad");
   } finally {
     saveInFlight = false;
+    if (remoteSyncReady && saveQueued) {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(syncStateToRemote, 0);
+    }
   }
 }
 
@@ -180,7 +186,6 @@ function needMatchesHotel(need, hotel = "all") {
 
 function needStaysOnDate(date, hotel = "all", identity = "all") {
   return state.needs.filter((need) => (
-    need.status !== "已取消" &&
     need.checkIn &&
     need.checkOut &&
     date >= need.checkIn &&
@@ -193,7 +198,6 @@ function needStaysOnDate(date, hotel = "all", identity = "all") {
 
 function roleNeedsOnDate(date, identity = "all", hotel = "all") {
   return state.needs.filter((need) => (
-    need.status !== "已取消" &&
     need.checkIn &&
     need.checkOut &&
     date >= need.checkIn &&
@@ -478,7 +482,6 @@ const roomUseOptions = ["未分配", "自己人", "工作人员", "导师", "嘉
 const needBatchHeaders = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "安排酒店", "房间类型", "房间号", "入住日期", "离店日期", "备注"];
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
-const needStatusOptions = ["未分配", "部分分配", "已分配", "已确认", "已取消", "异常"];
 const defaultHotelInfoRange = { start: "2026-07-29", end: "2026-08-06" };
 
 function escapeHtml(value) {
@@ -938,7 +941,6 @@ function needFromGroupedBatchRecords(records, sequence) {
     hotel: common.hotel,
     roomType: common.roomType,
     roomNo: common.roomNo,
-    status: common.hotel ? "已分配" : "未分配",
     owner: "",
     note: remarksFromBatchRecords(records),
     adults: people.length,
@@ -1007,7 +1009,6 @@ function needFromBatchRecord(record, index) {
   const companions = companionsFromBatchRecord(record, identity);
   const hotel = normalizeArrangementHotel(recordValue(record, ["安排酒店", "酒店"]));
   const roomType = normalizeNeedRoomType(recordValue(record, ["房间类型", "期望房型"]));
-  const status = needStatusOptions.includes(record["分配状态"]) ? record["分配状态"] : hotel ? "已分配" : "未分配";
   const people = Math.max(1, Number(record["人数"]) || 1 + companions.length);
   return {
     name,
@@ -1022,7 +1023,6 @@ function needFromBatchRecord(record, index) {
     hotel,
     roomType,
     roomNo: record["房间号"] || "",
-    status,
     owner: record["负责人"] || "",
     note: record["备注"] || "",
     adults: people,
@@ -1106,19 +1106,19 @@ function setView(view) {
 }
 
 function kpiData() {
+  const totalNeeds = state.needs.length;
   const nights = state.needs.reduce((sum, need) => sum + needNightCount(need), 0);
-  const assignedNights = state.needs.filter((need) => need.hotel).reduce((sum, need) => sum + needNightCount(need), 0);
-  const people = state.needs.reduce((sum, need) => sum + (Number(need.people) || 1), 0);
-  const unassigned = state.needs.filter((need) => need.status === "未分配").length;
-  const assigned = state.needs.filter((need) => need.hotel).length;
-  const pendingChanges = state.changes.filter((change) => change.hotelSynced === "否" || change.guestSynced === "否").length;
+  const people = state.needs.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
+  const withHotel = state.needs.filter((need) => need.hotel).length;
+  const missingHotel = state.needs.filter((need) => !need.hotel).length;
+  const missingRoomNo = state.needs.filter((need) => !need.roomNo).length;
   return [
-    ["总需求房晚", nights, "按入住需求日期计算"],
-    ["已安排房晚", assignedNights, "已选择酒店的需求房晚"],
+    ["总住宿需求", totalNeeds, "一条需求可包含多人"],
     ["总人数", people, "主人员和增加人员合计"],
-    ["已安排需求", assigned, "已指定酒店"],
-    ["未分配需求", unassigned, "需要继续处理"],
-    ["待处理事项", pendingChanges, "含待同步变更"]
+    ["总房晚", nights, "按入住到离店计算"],
+    ["已填酒店", withHotel, "已指定安排酒店"],
+    ["待补酒店", missingHotel, "需要补安排酒店"],
+    ["待补房间号", missingRoomNo, "需要补房间号"]
   ];
 }
 
@@ -1157,31 +1157,32 @@ function renderHeatmap() {
 
 function renderTasks() {
   const tasks = [];
-  state.needs.filter((need) => need.status === "未分配").forEach((need) => {
-    tasks.push(["未分配需求", need.name, `${need.identity}｜${need.people}人｜${need.checkIn} 入住`, "status-red"]);
-  });
-  state.bookings.filter((booking) => booking.confirmed === "否").forEach((booking) => {
-    const need = needById(booking.needId);
-    tasks.push(["已分配未确认", need?.name || "未知对象", `${roomLabel(booking.roomId)}｜${booking.checkIn} 至 ${booking.checkOut}`, "status-yellow"]);
-  });
-  state.changes.filter((change) => change.hotelSynced === "否" || change.guestSynced === "否").forEach((change) => {
-    tasks.push(["变更待同步", change.target, `${change.type}｜${change.reason}`, "status-red"]);
+  currentFilteredNeeds().forEach((need) => {
+    const name = peopleForNeed(need).map((person) => person.name).filter(Boolean).join("、") || "未填写姓名";
+    if (!need.hotel) {
+      tasks.push(["待补酒店", name, `${need.checkIn || "未填入住"} 至 ${need.checkOut || "未填离店"}`, "status-red"]);
+    } else if (!need.roomNo) {
+      tasks.push(["待补房间号", name, `${need.hotel}｜${need.roomType || "未填房型"}`, "status-yellow"]);
+    }
   });
   $("#taskList").innerHTML = tasks.length ? tasks.slice(0, 8).map(([type, name, desc, cls]) => `
     <div class="task ${cls}">
       <strong>${type}：${name}</strong>
       <span>${desc}</span>
     </div>
-  `).join("") : `<div class="task status-green"><strong>暂无紧急事项</strong><span>当前样例数据没有待处理红黄项。</span></div>`;
+  `).join("") : `<div class="task status-green"><strong>暂无待补信息</strong><span>当前入住需求的酒店和房间号都已填写。</span></div>`;
 }
 
 function renderUseBars() {
   const counts = {};
-  state.bookings.forEach((booking) => {
-    counts[booking.purpose] = (counts[booking.purpose] || 0) + nightsBetween(booking.checkIn, booking.checkOut).length;
+  state.needs.forEach((need) => {
+    peopleForNeed(need).forEach((person) => {
+      const identity = personIdentity(person, need.identity);
+      counts[identity] = (counts[identity] || 0) + 1;
+    });
   });
   if (!Object.keys(counts).length) {
-    $("#useBars").innerHTML = `<div class="task"><strong>暂无安排数据</strong><span>有住宿安排后，这里会显示用途分布。</span></div>`;
+    $("#useBars").innerHTML = `<div class="task"><strong>暂无人员数据</strong><span>新增入住需求后，这里会显示人员性质分布。</span></div>`;
     return;
   }
   const max = Math.max(1, ...Object.values(counts));
@@ -1216,7 +1217,7 @@ function populateFilters() {
   setSelectOptions("#onsiteHotel", hotelOptions);
   setSelectOptions("#needHotelFilter", hotelOptions);
   setSelectOptions("#needIdentityFilter", roleOptions);
-  $("#onsiteDate").innerHTML = dateOptions;
+  if ($("#onsiteDate")) $("#onsiteDate").innerHTML = dateOptions;
   const dates = activeDates();
   if (!$("#calendarStartInput").value) $("#calendarStartInput").value = defaultHotelInfoRange.start;
   if (!$("#calendarEndInput").value) $("#calendarEndInput").value = defaultHotelInfoRange.end;
@@ -1224,7 +1225,7 @@ function populateFilters() {
   if (!$("#roleStartInput").value) $("#roleStartInput").value = defaultHotelInfoRange.start;
   if (!$("#roleEndInput").value) $("#roleEndInput").value = defaultHotelInfoRange.end;
   refreshDateRangePicker(document.querySelector("[data-role-range]"));
-  if (!$("#onsiteDate").value) $("#onsiteDate").value = activeDates()[0];
+  if ($("#onsiteDate") && !$("#onsiteDate").value) $("#onsiteDate").value = activeDates()[0];
 }
 
 function renderCalendar() {
@@ -1490,7 +1491,9 @@ function renderNeeds() {
       stayTime: stayTimeCell(need),
       stayDays: `${needNightCount(need)}天`
     }));
-  $("#needsSummary").textContent = `共 ${rows.length} 条需求，未分配 ${rows.filter((item) => item.status === "未分配").length} 条`;
+  const peopleCount = rows.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
+  const nightCount = rows.reduce((sum, need) => sum + needNightCount(need), 0);
+  $("#needsSummary").textContent = `共 ${rows.length} 条需求，${peopleCount} 人，${nightCount} 间夜`;
   $("#needsTable").innerHTML = table([
     { key: "sequence", label: "序号" },
     { key: "nameList", label: "姓名", html: true },
@@ -1716,8 +1719,7 @@ function normalizeNeedValues(values) {
     ...values,
     companions,
     people,
-    adults: people,
-    status: values.hotel ? "已分配" : "未分配"
+    adults: people
   };
 }
 
@@ -1729,7 +1731,6 @@ function needFields() {
     { key: "idNo", label: "身份证号" },
     { key: "identity", label: "人员性质", type: "select", options: identityOptions },
     { key: "people", type: "hidden", default: 1 },
-    { key: "status", type: "hidden", default: "未分配" },
     { key: "companions", type: "peopleRepeater" },
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
     { key: "roomNo", label: "房间号" },
@@ -1774,8 +1775,8 @@ function bindEvents() {
   $("#exportHotelStatsBtn")?.addEventListener("click", exportHotelStats);
   $("#roleHotel").addEventListener("change", renderRoleStats);
   $("#exportRoleStatsBtn")?.addEventListener("click", exportRoleStats);
-  $("#onsiteDate").addEventListener("change", renderOnsite);
-  $("#onsiteHotel").addEventListener("change", renderOnsite);
+  $("#onsiteDate")?.addEventListener("change", renderOnsite);
+  $("#onsiteHotel")?.addEventListener("change", renderOnsite);
 
   $("#needSelect")?.addEventListener("change", () => {
     syncAssignmentDatesFromNeed();
@@ -1826,8 +1827,7 @@ function bindEvents() {
       checkIn: activeDates()[0],
       checkOut: activeDates()[1] || defaultDate(1),
       identity: "工作人员",
-      roomType: "双标",
-      status: "未分配"
+      roomType: "双标"
     }, (values) => {
       state.needs.push({ id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) });
       addDatesToEventRange(nightsBetween(values.checkIn, values.checkOut));
@@ -1864,7 +1864,7 @@ function bindEvents() {
     event.target.value = "";
   });
 
-  $("#addChangeBtn").addEventListener("click", () => {
+  $("#addChangeBtn")?.addEventListener("click", () => {
     openDialog("记录变更", changeFields(), {
       time: new Date().toISOString().slice(0, 16).replace("T", " "),
       type: "其他",
@@ -1954,9 +1954,8 @@ function bindEvents() {
     if (deleteNeedBtn) {
       const need = needById(deleteNeedBtn.dataset.deleteNeed);
       if (!need) return;
-      if (!confirm(`确定删除 ${need.name || "这条入住需求"} 吗？关联的安排记录也会一起删除。`)) return;
+      if (!confirm(`确定删除 ${need.name || "这条入住需求"} 吗？`)) return;
       state.needs = state.needs.filter((item) => item.id !== need.id);
-      state.bookings = state.bookings.filter((booking) => booking.needId !== need.id);
       saveState();
       render();
       return;

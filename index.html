@@ -46,7 +46,7 @@
               <div class="panel-header">
                 <div>
                   <h3>今日待处理</h3>
-                  <p>优先处理红色和黄色事项。</p>
+                  <p>优先补齐酒店和房间号。</p>
                 </div>
               </div>
               <div class="task-list" id="taskList"></div>
@@ -54,8 +54,8 @@
             <section class="panel">
               <div class="panel-header">
                 <div>
-                  <h3>用途分布</h3>
-                  <p>看工作人员、导师、嘉宾、家庭等占用。</p>
+                  <h3>人员性质分布</h3>
+                  <p>看工作人员、评委、嘉宾、家长等人数。</p>
                 </div>
               </div>
               <div class="bars" id="useBars"></div>
@@ -63,8 +63,8 @@
             <section class="panel heat-panel">
               <div class="panel-header">
                 <div>
-                  <h3>酒店日期房量热力表</h3>
-                  <p>按酒店和入住日期查看余量、异常与压力等级。</p>
+                  <h3>酒店日期统计</h3>
+                  <p>按酒店和入住日期查看各房型安排数量。</p>
                 </div>
               </div>
               <div class="heatmap-wrap">
@@ -200,29 +200,6 @@
           <div class="board" id="roleStatsBoard"></div>
         </section>
 
-        <section class="view" id="onsiteView" aria-labelledby="viewTitle">
-          <div class="filter-row">
-            <label>核对日期
-              <select id="onsiteDate"></select>
-            </label>
-            <label>酒店
-              <select id="onsiteHotel"></select>
-            </label>
-          </div>
-          <div class="table-wrap">
-            <table id="onsiteTable"></table>
-          </div>
-        </section>
-
-        <section class="view" id="changesView" aria-labelledby="viewTitle">
-          <div class="table-actions">
-            <button class="primary-btn" id="addChangeBtn" type="button">记录变更</button>
-            <span>换房、取消、延期、人数变化都先记在这里。</span>
-          </div>
-          <div class="table-wrap">
-            <table id="changesTable"></table>
-          </div>
-        </section>
       </main>
     </div>
 
