@@ -362,6 +362,10 @@ label.file-btn {
   font-size: 13px;
 }
 
+.sub-panel-header {
+  margin-top: 22px;
+}
+
 .heatmap {
   display: grid;
   grid-template-columns: 130px repeat(5, minmax(100px, 1fr));

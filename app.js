@@ -1870,6 +1870,26 @@ function renderUseBars() {
   `).join("");
 }
 
+function renderHotelBars() {
+  const counts = {};
+  visibleNeeds().forEach((need) => {
+    const hotel = normalizedNeedHotel(need.hotel) || "未安排酒店";
+    counts[hotel] = (counts[hotel] || 0) + 1;
+  });
+  if (!Object.keys(counts).length) {
+    $("#hotelBars").innerHTML = `<div class="task"><strong>暂无酒店数据</strong><span>新增入住需求后，这里会显示酒店分布。</span></div>`;
+    return;
+  }
+  const max = Math.max(1, ...Object.values(counts));
+  $("#hotelBars").innerHTML = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([hotel, count]) => `
+    <div class="bar-row">
+      <span>${hotel}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count / max * 100)}%"></div></div>
+      <strong>${count}</strong>
+    </div>
+  `).join("");
+}
+
 function optionHtml(value, label = value) {
   return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
 }
@@ -2293,6 +2313,7 @@ function render() {
     renderHeatmap();
     renderTasks();
     renderUseBars();
+    renderHotelBars();
   }
   if (activeView === "calendar") renderCalendar();
   if (activeView === "roleStats") renderRoleStats();
