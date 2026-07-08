@@ -956,14 +956,16 @@ function worksheetName(name, usedNames) {
 function workbookCellXml(cell, rowIndex) {
   const isCellObject = typeof cell === "object" && cell !== null;
   const isHeader = rowIndex === 0 || (isCellObject && cell.header);
+  const isNumber = isCellObject && cell.number === true;
   const value = isCellObject ? cell.value : cell;
+  const styleId = isHeader ? "Header" : (isNumber ? "Number" : "Cell");
   const attributes = [
     isCellObject && cell.index ? `ss:Index="${Number(cell.index)}"` : "",
     isCellObject && cell.colspan ? `ss:MergeAcross="${Number(cell.colspan) - 1}"` : "",
     isCellObject && cell.rowspan ? `ss:MergeDown="${Number(cell.rowspan) - 1}"` : "",
-    `ss:StyleID="${isHeader ? "Header" : "Cell"}"`
+    `ss:StyleID="${styleId}"`
   ].filter(Boolean).join(" ");
-  return `<Cell ${attributes}><Data ss:Type="String">${escapeHtml(value)}</Data></Cell>`;
+  return `<Cell ${attributes}><Data ss:Type="${isNumber ? "Number" : "String"}">${escapeHtml(value)}</Data></Cell>`;
 }
 
 function downloadStyledWorkbook(filename, sheets) {
@@ -1008,6 +1010,16 @@ function downloadStyledWorkbook(filename, sheets) {
           <Font ss:Bold="1"/>
           <Interior ss:Color="#F2F4F7" ss:Pattern="Solid"/>
           <NumberFormat ss:Format="@"/>
+        </Style>
+        <Style ss:ID="Number">
+          <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+          <Borders>
+            <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+            <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+          </Borders>
+          <NumberFormat ss:Format="#,##0"/>
         </Style>
       </Styles>
       ${worksheetXml}
@@ -1076,7 +1088,7 @@ function statsExportCells(needs, roomTypes) {
   const counts = needTypeCounts(needs);
   const total = roomTypes.reduce((sum, type) => sum + (counts[type] || 0), 0);
   if (!total) return roomTypes.map((_, index) => (index === 0 ? "暂无" : ""));
-  return roomTypes.map((type) => (counts[type] ? String(counts[type]) : ""));
+  return roomTypes.map((type) => (counts[type] ? { value: counts[type], number: true } : ""));
 }
 
 function buildStatsExportRows(firstColumnLabel, labels, dates, getNeeds) {
@@ -1098,12 +1110,12 @@ function buildStatsExportRows(firstColumnLabel, labels, dates, getNeeds) {
       });
       return statsExportCells(needs, roomTypes);
     });
-    rows.push([row.label, ...cells, String(rowTotal)]);
+    rows.push([row.label, ...cells, { value: rowTotal, number: true }]);
   });
   rows.push([
     { value: "总计", header: true },
-    ...columnTotals.map((count) => String(count)),
-    String(columnTotals.reduce((sum, count) => sum + count, 0))
+    ...columnTotals.map((count) => ({ value: count, number: true })),
+    { value: columnTotals.reduce((sum, count) => sum + count, 0), number: true }
   ]);
   return rows;
 }
