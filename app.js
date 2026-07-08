@@ -298,6 +298,14 @@ function visibleNeeds() {
   return state.needs.filter((need) => !pendingIds.has(need.id));
 }
 
+function pendingTaskIsAlreadyInSharedState(task) {
+  const total = task.total || task.needs?.length || 0;
+  if ((task.nextIndex || 0) < total) return false;
+  const savedIds = new Set((state.needs || []).map((need) => need.id).filter(Boolean));
+  const taskIds = (task.needs || []).map((need) => need.id).filter(Boolean);
+  return taskIds.length === total && taskIds.every((id) => savedIds.has(id));
+}
+
 function setUploadProgress(text = "", type = "") {
   const progress = $("#uploadProgress");
   if (!progress) return;
@@ -467,6 +475,12 @@ async function runNeedUploadTask(task) {
 async function resumePendingUploadIfNeeded() {
   const task = loadPendingUploadTask();
   if (!task || uploadInProgress) return;
+  if (pendingTaskIsAlreadyInSharedState(task)) {
+    clearPendingUploadTask();
+    setUploadProgress("");
+    render();
+    return;
+  }
   const total = task.total || task.needs.length;
   const allUploaded = (task.nextIndex || 0) >= total;
   setUploadProgress(`${allUploaded ? "待确认" : "未完成"} ${task.nextIndex || 0} / ${total}`, "bad");
