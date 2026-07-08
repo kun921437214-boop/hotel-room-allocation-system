@@ -1036,7 +1036,7 @@ function exportCurrentNeeds() {
   const headers = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "房间类型", "备注"];
   const rows = [headers];
   needs.forEach((need, index) => {
-    peopleForNeed(need).forEach((person) => {
+    peopleForNeed(need).forEach((person, personIndex) => {
       rows.push([
         String(index + 1),
         person.name || "",
@@ -1046,7 +1046,7 @@ function exportCurrentNeeds() {
         person.identity || "",
         need.checkIn || "",
         need.checkOut || "",
-        String(needNightCount(need)),
+        personIndex === 0 ? { value: needNightCount(need), number: true } : "",
         need.hotel || "",
         need.roomNo || "",
         need.roomType || "",
@@ -1054,7 +1054,7 @@ function exportCurrentNeeds() {
       ]);
     });
   });
-  downloadStyledTable(`入住需求当前名单-${dateToValue(new Date())}.xls`, rows);
+  downloadStyledWorkbook(`入住需求当前名单-${dateToValue(new Date())}.xls`, [{ name: "入住需求", rows }]);
 }
 
 function dateRangeValues(startSelector, endSelector, fallbackStart = defaultHotelInfoRange.start, fallbackEnd = defaultHotelInfoRange.end) {
