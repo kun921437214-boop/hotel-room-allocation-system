@@ -697,6 +697,10 @@ textarea {
   box-shadow: var(--shadow);
 }
 
+#needsView .table-wrap {
+  overflow-x: hidden;
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
@@ -705,7 +709,8 @@ table {
 
 #needsTable {
   table-layout: fixed;
-  min-width: 1240px;
+  min-width: 0;
+  width: 100%;
 }
 
 th,
@@ -733,76 +738,77 @@ td .row-actions {
 
 #needsTable th,
 #needsTable td {
-  font-size: 12px;
-  line-height: 1.28;
+  font-size: 11px;
+  line-height: 1.22;
   overflow: hidden;
-  padding: 6px 8px;
+  padding: 5px 5px;
   text-overflow: ellipsis;
+  white-space: normal;
 }
 
 #needsTable th:nth-child(1),
 #needsTable td:nth-child(1) {
-  width: 48px;
+  width: 3.2%;
 }
 
 #needsTable th:nth-child(2),
 #needsTable td:nth-child(2) {
-  width: 96px;
+  width: 8.2%;
 }
 
 #needsTable th:nth-child(3),
 #needsTable td:nth-child(3) {
-  width: 48px;
+  width: 4.2%;
 }
 
 #needsTable th:nth-child(4),
 #needsTable td:nth-child(4) {
-  width: 108px;
+  width: 9.4%;
 }
 
 #needsTable th:nth-child(5),
 #needsTable td:nth-child(5) {
-  width: 152px;
+  width: 13.2%;
 }
 
 #needsTable th:nth-child(6),
 #needsTable td:nth-child(6) {
-  width: 88px;
+  width: 8.2%;
 }
 
 #needsTable th:nth-child(7),
 #needsTable td:nth-child(7) {
-  width: 132px;
+  width: 11.6%;
 }
 
 #needsTable th:nth-child(8),
 #needsTable td:nth-child(8) {
-  width: 68px;
+  width: 6.2%;
 }
 
 #needsTable th:nth-child(9),
 #needsTable td:nth-child(9) {
-  width: 82px;
+  width: 7%;
 }
 
 #needsTable th:nth-child(10),
 #needsTable td:nth-child(10) {
-  width: 70px;
+  width: 5.8%;
 }
 
 #needsTable th:nth-child(11),
 #needsTable td:nth-child(11) {
-  width: 76px;
+  width: 6.6%;
 }
 
 #needsTable th:nth-child(12),
 #needsTable td:nth-child(12) {
-  width: 140px;
+  width: 10.4%;
 }
 
 #needsTable th:nth-child(13),
 #needsTable td:nth-child(13) {
-  width: 110px;
+  width: 6%;
 }
 
 .compact-lines {
@@ -821,8 +827,8 @@ td .row-actions {
 
 #needsTable .people-stack-cell,
 #needsTable .stay-time-cell {
-  gap: 2px;
-  min-height: 30px;
+  gap: 1px;
+  min-height: 28px;
 }
 
 .people-stack-line,
@@ -845,7 +851,7 @@ td .row-actions {
 
 #needsTable .people-stack-line,
 #needsTable .stay-time-cell div {
-  gap: 4px;
+  gap: 3px;
   line-height: 1.25;
   min-width: 0;
   overflow: hidden;
@@ -859,7 +865,7 @@ td .row-actions {
 #needsTable .stay-time-cell span {
   border-radius: 4px;
   font-size: 10px;
-  padding: 0 4px;
+  padding: 0 3px;
 }
 
 #needsTable .stay-time-cell strong {
@@ -869,7 +875,15 @@ td .row-actions {
 }
 
 #needsTable .row-actions {
-  gap: 4px;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 3px;
+}
+
+#needsTable .mini-btn {
+  min-height: 24px;
+  padding: 3px 5px;
+  width: 100%;
 }
 
 .people-stack-line,
