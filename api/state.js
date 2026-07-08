@@ -1,3 +1,5 @@
+const crypto = require("crypto");
+
 const FEISHU_BASE_URL = process.env.FEISHU_BASE_URL || "https://open.feishu.cn";
 const FEISHU_APP_TOKEN = process.env.FEISHU_APP_TOKEN || process.env.FEISHU_BITABLE_APP_TOKEN || "Mg3abeaEya2QptsxOjIchxSLndd";
 const SYNC_TABLE_NAME = process.env.FEISHU_SYNC_TABLE_NAME || "系统同步数据";
@@ -31,6 +33,42 @@ let tableIdCache = "";
 let readableTableCache = {};
 let coreTableCache = {};
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelay(attempt) {
+  return [350, 900, 1800][attempt] || 1800;
+}
+
+function retryableResponse(response, body) {
+  if (!response) return true;
+  const message = String(body?.msg || body?.error || "");
+  return response.status === 429 || response.status >= 500 || /timeout|temporar|频率|限流|rate/i.test(message);
+}
+
+async function fetchJsonWithRetry(url, options = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      const body = await response.json().catch(() => ({}));
+      clearTimeout(timer);
+      if (response.ok || !retryableResponse(response, body) || attempt === 2) {
+        return { response, body };
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = error;
+      if (attempt === 2) throw error;
+    }
+    await sleep(retryDelay(attempt));
+  }
+  throw lastError || new Error("网络请求失败");
+}
+
 function json(res, status, body) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
@@ -55,12 +93,11 @@ async function tenantAccessToken() {
   if (!appId || !appSecret) {
     throw new Error("后端缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET 环境变量。");
   }
-  const response = await fetch(`${FEISHU_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal`, {
+  const { response, body } = await fetchJsonWithRetry(`${FEISHU_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({ app_id: appId, app_secret: appSecret })
   });
-  const body = await response.json().catch(() => ({}));
   if (!response.ok || body.code !== 0 || !body.tenant_access_token) {
     throw new Error(`获取飞书访问令牌失败：${body.msg || response.statusText}`);
   }
@@ -73,7 +110,7 @@ async function tenantAccessToken() {
 
 async function feishu(method, path, payload) {
   const token = await tenantAccessToken();
-  const response = await fetch(`${FEISHU_BASE_URL}${path}`, {
+  const { response, body } = await fetchJsonWithRetry(`${FEISHU_BASE_URL}${path}`, {
     method,
     headers: {
       authorization: `Bearer ${token}`,
@@ -81,7 +118,6 @@ async function feishu(method, path, payload) {
     },
     body: payload ? JSON.stringify(payload) : undefined
   });
-  const body = await response.json().catch(() => ({}));
   if (!response.ok || body.code !== 0) {
     throw new Error(`飞书接口失败：${body.msg || response.statusText}`);
   }
@@ -284,7 +320,7 @@ async function batchDeleteRecords(tableId, recordIds) {
 const NEED_FIELDS = ["需求ID", "入住日期", "离店日期", "安排酒店", "房间号", "房间类型", "备注", "上传批次", "上传时间", "创建时间", "更新时间", "是否删除"];
 const PERSON_FIELDS = ["人员ID", "需求ID", "顺序", "姓名", "性别", "电话", "身份证号", "人员性质", "是否主人员", "上传批次", "更新时间", "是否删除"];
 const OPERATION_FIELDS = ["操作ID", "操作时间", "操作类型", "需求ID", "上传批次", "影响条数", "操作人", "说明"];
-const BACKUP_FIELDS = ["备份日期", "备份时间", "需求数", "人数", "间夜", "JSON内容", "说明"];
+const BACKUP_FIELDS = ["备份ID", "备份类型", "备份日期", "备份时间", "关联操作", "上传批次", "需求数", "人数", "间夜", "JSON内容", "说明"];
 
 async function ensureCoreTableIds() {
   const needTableId = await ensureCoreTable(NEED_TABLE_NAME, NEED_FIELDS);
@@ -369,6 +405,16 @@ function nowIso() {
 
 function todayKey() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function stateVersion(state) {
+  return crypto
+    .createHash("sha1")
+    .update(JSON.stringify({
+      needs: Array.isArray(state?.needs) ? state.needs : [],
+      eventDates: Array.isArray(state?.eventDates) ? state.eventDates : []
+    }))
+    .digest("hex");
 }
 
 function coreKeyMap(records, keyField) {
@@ -671,27 +717,58 @@ function stateSummary(state) {
   };
 }
 
-async function upsertDailyBackup(state, tableIds, reason = "网站自动每日备份") {
-  const { backupTableId } = tableIds || await ensureCoreTableIds();
-  const date = todayKey();
+function backupFields(state, options = {}) {
+  const date = options.date || todayKey();
   const summary = stateSummary(state);
-  const fields = {
+  return {
+    "备份ID": options.id || `BACKUP-${date}-${Date.now()}`,
+    "备份类型": options.type || "每日备份",
     "备份日期": date,
     "备份时间": nowIso(),
+    "关联操作": options.operation || "",
+    "上传批次": options.batchId || "",
     "需求数": String(summary.needCount),
     "人数": String(summary.peopleCount),
     "间夜": String(summary.nightCount),
     "JSON内容": JSON.stringify(state),
-    "说明": reason
+    "说明": options.reason || "网站自动备份"
   };
+}
+
+async function upsertDailyBackup(state, tableIds, reason = "网站自动每日备份") {
+  const { backupTableId } = tableIds || await ensureCoreTableIds();
+  const date = todayKey();
+  const fields = backupFields(state, {
+    id: `DAILY-${date}`,
+    type: "每日备份",
+    date,
+    reason
+  });
   const records = await listRecords(backupTableId);
-  const existing = records.find((record) => String(record.fields?.["备份日期"] || "") === date);
+  const existing = records.find((record) => {
+    const fields = record.fields || {};
+    return fields["备份ID"] === `DAILY-${date}` || (!fields["备份ID"] && String(fields["备份日期"] || "") === date);
+  });
   if (existing?.record_id) {
     await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records/${existing.record_id}`, { fields });
   } else {
     await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records`, { fields });
-    await recordOperation("每日备份", "", `${date} 已生成每日备份`, tableIds, { count: summary.needCount });
+    await recordOperation("每日备份", "", `${date} 已生成每日备份`, tableIds, { count: stateSummary(state).needCount });
   }
+}
+
+async function createOperationBackup(state, tableIds, options = {}) {
+  const { backupTableId } = tableIds || await ensureCoreTableIds();
+  const date = todayKey();
+  const fields = backupFields(state, {
+    id: `BEFORE-${date}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type: "操作前备份",
+    date,
+    operation: options.operation || "",
+    batchId: options.batchId || "",
+    reason: options.reason || "高风险操作前自动备份"
+  });
+  await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records`, { fields });
 }
 
 async function tryDailyBackup(state, tableIds, reason) {
@@ -762,11 +839,12 @@ function stateFromCoreRecords(needRecords, personRecords) {
   };
 }
 
-async function readCoreState() {
-  const tableIds = await ensureCoreTableIds();
-  const needRecords = await listRecords(tableIds.needTableId);
-  const personRecords = await listRecords(tableIds.personTableId);
-  return { state: stateFromCoreRecords(needRecords, personRecords), tableIds, hasCoreRecords: needRecords.length > 0 };
+async function readCoreState(tableIds = null) {
+  const ids = tableIds || await ensureCoreTableIds();
+  const needRecords = await listRecords(ids.needTableId);
+  const personRecords = await listRecords(ids.personTableId);
+  const state = stateFromCoreRecords(needRecords, personRecords);
+  return { state, version: stateVersion(state), tableIds: ids, hasCoreRecords: needRecords.length > 0 };
 }
 
 async function migrateLegacyStateIfNeeded() {
@@ -1007,7 +1085,15 @@ async function syncReadableMirrorTables(state) {
   await deleteObsoleteReadableTables();
 }
 
-module.exports = async function handler(req, res) {
+function shouldCheckStateVersion(body) {
+  return Boolean(body?.baseVersion) && ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds"].includes(body?.action);
+}
+
+function shouldCreateOperationBackup(body) {
+  return ["upsertNeeds", "deleteNeed", "deleteNeeds"].includes(body?.action);
+}
+
+async function handler(req, res) {
   if (req.method === "OPTIONS") return json(res, 200, { ok: true });
   if (!["GET", "PUT", "POST"].includes(req.method)) return json(res, 405, { ok: false, error: "Method not allowed" });
 
@@ -1015,7 +1101,7 @@ module.exports = async function handler(req, res) {
     if (req.method === "GET") {
       const state = await migrateLegacyStateIfNeeded();
       await tryDailyBackup(state, null, "打开网站时自动备份");
-      return json(res, 200, { ok: true, state, source: "core_tables" });
+      return json(res, 200, { ok: true, state, version: stateVersion(state), source: "core_tables" });
     }
 
     const body = await readJsonBody(req);
@@ -1023,6 +1109,34 @@ module.exports = async function handler(req, res) {
     const deferMirror = body?.deferMirror === true;
     const shouldSyncReadableViews = body?.action === "refreshViews";
     let cleanupResult = null;
+    let beforeWrite = null;
+    const readBeforeWrite = async () => {
+      if (!beforeWrite) beforeWrite = await readCoreState(tableIds);
+      return beforeWrite;
+    };
+
+    if (shouldCheckStateVersion(body)) {
+      const current = await readBeforeWrite();
+      if (current.version !== body.baseVersion) {
+        return json(res, 409, {
+          ok: false,
+          stale: true,
+          error: "共享数据已被其他人更新。为避免覆盖，请刷新后再操作。",
+          state: current.state,
+          version: current.version,
+          source: "core_tables"
+        });
+      }
+    }
+
+    if (shouldCreateOperationBackup(body)) {
+      const current = await readBeforeWrite();
+      await createOperationBackup(current.state, tableIds, {
+        operation: body.operationType || body.action || "",
+        batchId: body.batchId || "",
+        reason: body.operationDescription || "高风险操作前自动备份"
+      });
+    }
 
     if (body?.action === "upsertNeed") {
       await upsertNeedCore(body.need, tableIds);
@@ -1099,10 +1213,10 @@ module.exports = async function handler(req, res) {
       );
     } else if (body?.action === "cleanupDuplicates") {
       cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
-      const { state } = await readCoreState();
+      const { state, version } = await readCoreState(tableIds);
       await refreshLegacySnapshot(state);
       await tryDailyBackup(state, tableIds, "清理重复数据后自动备份");
-      return json(res, 200, { ok: true, state, source: "core_tables", cleanup: cleanupResult });
+      return json(res, 200, { ok: true, state, version, source: "core_tables", cleanup: cleanupResult });
     } else if (body?.action === "refreshViews") {
       cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
       await recordOperation("刷新展示", "", "网站刷新住宿展示数据", tableIds);
@@ -1114,7 +1228,7 @@ module.exports = async function handler(req, res) {
       return json(res, 400, { ok: false, error: "缺少可保存的数据。" });
     }
 
-    const { state } = await readCoreState();
+    const { state, version } = await readCoreState(tableIds);
     await refreshLegacySnapshot(state);
     await tryDailyBackup(state, tableIds, "保存数据后自动备份");
     let mirrorError = "";
@@ -1125,8 +1239,11 @@ module.exports = async function handler(req, res) {
         mirrorError = error.message || "飞书查看表同步失败";
       }
     }
-    return json(res, 200, { ok: true, state, source: "core_tables", mirrorError, cleanup: cleanupResult });
+    return json(res, 200, { ok: true, state, version, source: "core_tables", mirrorError, cleanup: cleanupResult });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "同步失败" });
   }
-};
+}
+
+module.exports = handler;
+module.exports.config = { maxDuration: 60 };

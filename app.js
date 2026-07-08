@@ -28,6 +28,7 @@ let remoteOperationPending = 0;
 let localStateRevision = 0;
 let needsRemoteSaveAfterLoad = false;
 let uploadInProgress = false;
+let remoteStateVersion = "";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -102,32 +103,42 @@ function markLocalStateChanged() {
 
 async function loadRemoteState() {
   setSyncStatus("正在连接共享数据");
-  const startedAtRevision = localStateRevision;
   try {
     const response = await fetch(syncApiUrl, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
-    const hasLocalChanges = startedAtRevision !== localStateRevision || needsRemoteSaveAfterLoad;
-    if (payload?.state && !hasLocalChanges) {
+    if (payload?.state) {
       state = payload.state;
+      remoteStateVersion = payload.version || "";
       saveLocalStateOnly();
     }
     remoteSyncReady = true;
-    if (hasLocalChanges) {
-      needsRemoteSaveAfterLoad = false;
-      saveQueued = true;
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(syncStateToRemote, 0);
-      setSyncStatus("正在保存共享数据");
-    } else {
-      setSyncStatus("共享数据已同步", "ok");
-    }
+    needsRemoteSaveAfterLoad = false;
+    saveQueued = false;
+    clearTimeout(saveTimer);
+    setSyncStatus("共享数据已同步", "ok");
     return true;
   } catch (error) {
     remoteSyncReady = false;
     setSyncStatus("本地模式，未连接共享数据", "bad");
     return false;
   }
+}
+
+function applyRemoteResult(result, shouldRender = true) {
+  if (result?.version) remoteStateVersion = result.version;
+  if (result?.state) {
+    state = result.state;
+    saveLocalStateOnly();
+    if (shouldRender) render();
+  }
+}
+
+function handleStaleRemoteResult(result) {
+  applyRemoteResult(result, true);
+  remoteSyncReady = true;
+  saveQueued = false;
+  setSyncStatus("共享数据已更新，请重新操作", "bad");
 }
 
 function scheduleRemoteSave() {
@@ -148,14 +159,17 @@ async function syncStateToRemote() {
     const response = await fetch(syncApiUrl, {
       method: "PUT",
       headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ state })
+      body: JSON.stringify({ state, baseVersion: remoteStateVersion })
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json().catch(() => ({}));
+    if (response.status === 409 && result?.stale) {
+      handleStaleRemoteResult(result);
+      return;
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (result?.version) remoteStateVersion = result.version;
     if (result?.state && startedAtRevision === localStateRevision) {
-      state = result.state;
-      saveLocalStateOnly();
-      render();
+      applyRemoteResult(result, true);
     }
     remoteSyncReady = true;
     setSyncStatus("共享数据已保存", "ok");
@@ -189,14 +203,17 @@ async function syncOperationToRemote(payload) {
     const response = await fetch(syncApiUrl, {
       method: "PUT",
       headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ ...payload, baseVersion: remoteStateVersion })
     });
+    const result = await response.json().catch(() => ({}));
+    if (response.status === 409 && result?.stale) {
+      handleStaleRemoteResult(result);
+      return;
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const result = await response.json();
+    if (result?.version) remoteStateVersion = result.version;
     if (result?.state && remoteOperationPending <= 1) {
-      state = result.state;
-      saveLocalStateOnly();
-      render();
+      applyRemoteResult(result, true);
     }
     remoteSyncReady = true;
     setSyncStatus("共享数据已保存", "ok");
@@ -386,15 +403,21 @@ function showUploadDialog({ title, message, meta = "", primaryText = "继续上�
 }
 
 async function syncUploadPayload(payload) {
+  const shouldCheckVersion = payload.action === "upsertNeeds";
   const response = await fetch(syncApiUrl, {
     method: "PUT",
     headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(shouldCheckVersion ? { ...payload, baseVersion: remoteStateVersion } : payload)
   });
   const result = await response.json().catch(() => ({}));
+  if (response.status === 409 && result?.stale) {
+    handleStaleRemoteResult(result);
+    throw new Error("共享数据已被其他人更新，请重新选择文件上传。");
+  }
   if (!response.ok || result?.ok === false) {
     throw new Error(result?.error || `HTTP ${response.status}`);
   }
+  if (result?.version) remoteStateVersion = result.version;
   return result;
 }
 
@@ -421,7 +444,7 @@ async function uploadNeedTaskOnce(task) {
   savePendingUploadTask(task);
   setUploadProgress(`上传 0 / ${task.total}`);
   setSyncStatus("正在批量保存共享数据");
-  await syncUploadPayload({
+  const result = await syncUploadPayload({
     action: "upsertNeeds",
     needs: task.needs,
     batchId: task.id,
@@ -433,8 +456,9 @@ async function uploadNeedTaskOnce(task) {
   task.nextIndex = task.total;
   savePendingUploadTask(task);
   setUploadProgress(`上传 ${task.nextIndex} / ${task.total}`);
-  setUploadProgress("正在确认数据");
-  await refreshSharedStateAfterUpload();
+  if (result?.state) {
+    applyRemoteResult(result, true);
+  }
   clearPendingUploadTask();
   render();
   setUploadProgress(`完成 ${task.total} / ${task.total}`, "done");
@@ -448,15 +472,16 @@ async function rollbackUploadTask(task) {
   const ids = (task.needs || []).map((need) => need.id).filter(Boolean);
   await ensureRemoteForUpload();
   setUploadProgress(`正在取消 ${ids.length} / ${ids.length}`);
-  await syncUploadPayload({
+  const result = await syncUploadPayload({
     action: "deleteNeeds",
     needIds: ids,
-    deferMirror: true,
     batchId: task.id,
     operationType: "撤回上传批次",
     operationDescription: `${task.batchName || task.id} 撤回 ${ids.length} 条住宿需求`
   });
-  await refreshSharedStateAfterUpload();
+  if (result?.state) {
+    applyRemoteResult(result, true);
+  }
   clearPendingUploadTask();
   setUploadProgress("");
 }
