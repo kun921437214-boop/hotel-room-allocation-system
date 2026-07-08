@@ -21,6 +21,8 @@ let remoteSyncReady = false;
 let saveTimer = null;
 let saveInFlight = false;
 let saveQueued = false;
+let remoteOperationChain = Promise.resolve();
+let remoteOperationPending = 0;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -139,6 +141,56 @@ async function syncStateToRemote() {
       saveTimer = setTimeout(syncStateToRemote, 0);
     }
   }
+}
+
+function queueRemoteOperation(payload) {
+  if (!remoteSyncReady) return;
+  remoteOperationPending += 1;
+  setSyncStatus("正在保存共享数据");
+  remoteOperationChain = remoteOperationChain
+    .catch(() => {})
+    .then(() => syncOperationToRemote(payload))
+    .finally(() => {
+      remoteOperationPending = Math.max(0, remoteOperationPending - 1);
+    });
+}
+
+async function syncOperationToRemote(payload) {
+  if (!remoteSyncReady) return;
+  try {
+    const response = await fetch(syncApiUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    if (result?.state && remoteOperationPending <= 1) {
+      state = result.state;
+      saveLocalStateOnly();
+      render();
+    }
+    remoteSyncReady = true;
+    setSyncStatus("共享数据已保存", "ok");
+  } catch (error) {
+    remoteSyncReady = false;
+    setSyncStatus("保存失败，已保存在本机", "bad");
+  }
+}
+
+function saveNeedState(need) {
+  saveLocalStateOnly();
+  queueRemoteOperation({ action: "upsertNeed", need });
+}
+
+function saveNeedsState(needs) {
+  saveLocalStateOnly();
+  queueRemoteOperation({ action: "upsertNeeds", needs });
+}
+
+function deleteNeedState(needId) {
+  saveLocalStateOnly();
+  queueRemoteOperation({ action: "deleteNeed", needId });
 }
 
 function nextId(prefix, list) {
@@ -1077,11 +1129,14 @@ async function importNeedBatch(file) {
     alert(error.message);
     return;
   }
+  const addedNeeds = [];
   needs.forEach((need) => {
-    state.needs.push({ id: nextId("REQ-", state.needs), ...need });
-    addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
+    const item = { id: nextId("REQ-", state.needs), ...need };
+    state.needs.push(item);
+    addedNeeds.push(item);
+    addDatesToEventRange(nightsBetween(item.checkIn, item.checkOut));
   });
-  saveState();
+  saveNeedsState(addedNeeds);
   render();
   alert(`已批量新增 ${needs.length} 条入住需求。`);
 }
@@ -1829,8 +1884,10 @@ function bindEvents() {
       identity: "工作人员",
       roomType: "双标"
     }, (values) => {
-      state.needs.push({ id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) });
-      addDatesToEventRange(nightsBetween(values.checkIn, values.checkOut));
+      const need = { id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) };
+      state.needs.push(need);
+      addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
+      return { type: "need", need };
     });
   });
   $("#downloadNeedTemplateBtn").addEventListener("click", downloadNeedTemplate);
@@ -1956,7 +2013,7 @@ function bindEvents() {
       if (!need) return;
       if (!confirm(`确定删除 ${need.name || "这条入住需求"} 吗？`)) return;
       state.needs = state.needs.filter((item) => item.id !== need.id);
-      saveState();
+      deleteNeedState(need.id);
       render();
       return;
     }
@@ -1973,7 +2030,11 @@ function bindEvents() {
     }
     if (needBtn) {
       const need = needById(needBtn.dataset.editNeed);
-      openDialog("编辑入住需求", needFields(), need, (values) => Object.assign(need, normalizeNeedValues(values)));
+      openDialog("编辑入住需求", needFields(), need, (values) => {
+        Object.assign(need, normalizeNeedValues(values));
+        addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
+        return { type: "need", need };
+      });
     }
     if (roomBtn) {
       const room = roomById(roomBtn.dataset.editRoom);
@@ -1998,8 +2059,12 @@ function bindEvents() {
   $("#dialogForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (!editing) return;
-    editing.onSave(dialogValues());
-    saveState();
+    const result = editing.onSave(dialogValues());
+    if (result?.type === "need") {
+      saveNeedState(result.need);
+    } else {
+      saveState();
+    }
     $("#editDialog").close();
     editing = null;
     render();

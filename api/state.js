@@ -2,6 +2,9 @@ const FEISHU_BASE_URL = process.env.FEISHU_BASE_URL || "https://open.feishu.cn";
 const FEISHU_APP_TOKEN = process.env.FEISHU_APP_TOKEN || process.env.FEISHU_BITABLE_APP_TOKEN || "Mg3abeaEya2QptsxOjIchxSLndd";
 const SYNC_TABLE_NAME = process.env.FEISHU_SYNC_TABLE_NAME || "系统同步数据";
 const SYNC_RECORD_KEY = process.env.FEISHU_SYNC_RECORD_KEY || "hotel-room-state-v1";
+const NEED_TABLE_NAME = "住宿需求核心表";
+const PERSON_TABLE_NAME = "住宿人员明细表";
+const OPERATION_TABLE_NAME = "操作记录表";
 const ACTIVE_READABLE_TABLE_NAMES = ["住宿人员名单", "酒店统计查看", "角色统计查看"];
 const OBSOLETE_READABLE_TABLE_NAMES = ["入住需求查看", "酒店房间查看", "分房记录查看", "变更记录查看"];
 const ARRANGEMENT_HOTELS = ["汉庭", "如家", "万豪"];
@@ -24,12 +27,13 @@ const sampleData = {
 let tokenCache = { token: "", expiresAt: 0 };
 let tableIdCache = "";
 let readableTableCache = {};
+let coreTableCache = {};
 
 function json(res, status, body) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("access-control-allow-origin", "*");
-  res.setHeader("access-control-allow-methods", "GET,PUT,OPTIONS");
+  res.setHeader("access-control-allow-methods", "GET,PUT,POST,OPTIONS");
   res.setHeader("access-control-allow-headers", "content-type");
   res.end(JSON.stringify(body));
 }
@@ -153,6 +157,28 @@ async function ensureReadableTable(tableName, fields) {
   return readableTableCache[tableName];
 }
 
+async function ensureCoreTable(tableName, fields) {
+  if (coreTableCache[tableName]) return coreTableCache[tableName];
+  const tables = await allTables();
+  const existing = tables.find((table) => table.name === tableName);
+  if (existing?.table_id) {
+    coreTableCache[tableName] = existing.table_id;
+    await ensureReadableFields(coreTableCache[tableName], fields);
+    return coreTableCache[tableName];
+  }
+
+  const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables`, {
+    table: {
+      name: tableName,
+      default_view_name: "全部",
+      fields: fields.map((fieldName) => ({ field_name: fieldName, type: 1 }))
+    }
+  });
+  coreTableCache[tableName] = created.table?.table_id || created.table_id;
+  if (!coreTableCache[tableName]) throw new Error(`飞书核心表 ${tableName} 创建成功但没有返回 table_id。`);
+  return coreTableCache[tableName];
+}
+
 async function listFields(tableId) {
   return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields`, 100);
 }
@@ -188,6 +214,17 @@ async function deleteObsoleteReadableTables() {
 
 async function listRecords(tableId) {
   return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records`, 500);
+}
+
+const NEED_FIELDS = ["需求ID", "入住日期", "离店日期", "安排酒店", "房间号", "房间类型", "备注", "创建时间", "更新时间", "是否删除"];
+const PERSON_FIELDS = ["人员ID", "需求ID", "顺序", "姓名", "性别", "电话", "身份证号", "人员性质", "是否主人员", "更新时间", "是否删除"];
+const OPERATION_FIELDS = ["操作ID", "操作时间", "操作类型", "需求ID", "操作人", "说明"];
+
+async function ensureCoreTableIds() {
+  const needTableId = await ensureCoreTable(NEED_TABLE_NAME, NEED_FIELDS);
+  const personTableId = await ensureCoreTable(PERSON_TABLE_NAME, PERSON_FIELDS);
+  const operationTableId = await ensureCoreTable(OPERATION_TABLE_NAME, OPERATION_FIELDS);
+  return { needTableId, personTableId, operationTableId };
 }
 
 async function upsertReadableRecords(tableId, keyField, rows) {
@@ -234,6 +271,239 @@ async function updateSyncRecord(tableId, recordId, state) {
     "最后更新时间": new Date().toISOString()
   };
   return feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${recordId}`, { fields });
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function coreKeyMap(records, keyField) {
+  return new Map(records.map((record) => [String(record.fields?.[keyField] || ""), record]).filter(([key]) => key));
+}
+
+function isDeletedRecord(record) {
+  return String(record.fields?.["是否删除"] || "") === "是";
+}
+
+function needCoreFields(need, existingFields = {}) {
+  const updatedAt = nowIso();
+  return {
+    "需求ID": need.id || "",
+    "入住日期": need.checkIn || "",
+    "离店日期": need.checkOut || "",
+    "安排酒店": normalizedNeedHotel(need.hotel),
+    "房间号": need.roomNo || "",
+    "房间类型": need.roomType || "",
+    "备注": need.note || "",
+    "创建时间": existingFields["创建时间"] || need.createdAt || updatedAt,
+    "更新时间": updatedAt,
+    "是否删除": "否"
+  };
+}
+
+function needPeopleRows(need) {
+  return peopleForNeed(need).map((person, index) => ({
+    "人员ID": person.personId || `${need.id}-P${index + 1}`,
+    "需求ID": need.id || "",
+    "顺序": String(index + 1),
+    "姓名": person.name || "",
+    "性别": person.gender || "",
+    "电话": person.phone || "",
+    "身份证号": person.idNo || "",
+    "人员性质": personIdentity(person, need.identity),
+    "是否主人员": index === 0 ? "是" : "否",
+    "更新时间": nowIso(),
+    "是否删除": "否"
+  }));
+}
+
+async function readCoreWriteContext(tableIds) {
+  const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
+  const needRecords = await listRecords(needTableId);
+  const personRecords = await listRecords(personTableId);
+  const peopleByNeed = new Map();
+  personRecords.forEach((record) => {
+    const needId = String(record.fields?.["需求ID"] || "");
+    if (!needId) return;
+    if (!peopleByNeed.has(needId)) peopleByNeed.set(needId, []);
+    peopleByNeed.get(needId).push(record);
+  });
+  return {
+    needById: coreKeyMap(needRecords, "需求ID"),
+    peopleByNeed
+  };
+}
+
+async function upsertNeedCore(need, tableIds, context = null) {
+  if (!need?.id) throw new Error("缺少需求ID，无法保存。");
+  const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
+  const writeContext = context || await readCoreWriteContext(tableIds);
+  const existingNeed = writeContext.needById.get(String(need.id));
+  const needFields = needCoreFields(need, existingNeed?.fields || {});
+  if (existingNeed?.record_id) {
+    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records/${existingNeed.record_id}`, { fields: needFields });
+    writeContext.needById.set(String(need.id), { ...existingNeed, fields: needFields });
+  } else {
+    const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records`, { fields: needFields });
+    writeContext.needById.set(String(need.id), {
+      record_id: created.record?.record_id || created.record_id || "",
+      fields: needFields
+    });
+  }
+
+  const personRows = needPeopleRows(need);
+  const existingPeople = writeContext.peopleByNeed.get(need.id) || [];
+  const existingPeopleById = coreKeyMap(existingPeople, "人员ID");
+  const incomingPersonIds = new Set(personRows.map((row) => row["人员ID"]));
+  for (const row of personRows) {
+    const existing = existingPeopleById.get(row["人员ID"]);
+    if (existing?.record_id) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${existing.record_id}`, { fields: row });
+      existing.fields = row;
+    } else {
+      const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records`, { fields: row });
+      existingPeople.push({
+        record_id: created.record?.record_id || created.record_id || "",
+        fields: row
+      });
+    }
+  }
+
+  for (const record of existingPeople) {
+    const personId = String(record.fields?.["人员ID"] || "");
+    if (personId && !incomingPersonIds.has(personId) && !isDeletedRecord(record)) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
+        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+      });
+      record.fields = { ...record.fields, "更新时间": nowIso(), "是否删除": "是" };
+    }
+  }
+  writeContext.peopleByNeed.set(need.id, existingPeople);
+}
+
+async function deleteNeedCore(needId, tableIds) {
+  const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
+  const needRecords = await listRecords(needTableId);
+  const needRecord = coreKeyMap(needRecords, "需求ID").get(String(needId || ""));
+  if (needRecord?.record_id) {
+    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records/${needRecord.record_id}`, {
+      fields: { ...needRecord.fields, "更新时间": nowIso(), "是否删除": "是" }
+    });
+  }
+
+  const personRecords = await listRecords(personTableId);
+  for (const record of personRecords.filter((item) => item.fields?.["需求ID"] === needId && !isDeletedRecord(item))) {
+    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
+      fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+    });
+  }
+}
+
+async function recordOperation(type, needId, description, tableIds) {
+  const { operationTableId } = tableIds || await ensureCoreTableIds();
+  const id = `OP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${operationTableId}/records`, {
+    fields: {
+      "操作ID": id,
+      "操作时间": nowIso(),
+      "操作类型": type,
+      "需求ID": needId || "",
+      "操作人": "网站",
+      "说明": description || ""
+    }
+  });
+}
+
+function stateFromCoreRecords(needRecords, personRecords) {
+  const activeNeedRecords = needRecords.filter((record) => !isDeletedRecord(record));
+  const peopleByNeed = new Map();
+  personRecords
+    .filter((record) => !isDeletedRecord(record))
+    .sort((a, b) => Number(a.fields?.["顺序"] || 0) - Number(b.fields?.["顺序"] || 0))
+    .forEach((record) => {
+      const needId = String(record.fields?.["需求ID"] || "");
+      if (!needId) return;
+      if (!peopleByNeed.has(needId)) peopleByNeed.set(needId, []);
+      peopleByNeed.get(needId).push({
+        personId: record.fields?.["人员ID"] || "",
+        name: record.fields?.["姓名"] || "",
+        gender: record.fields?.["性别"] || "",
+        phone: record.fields?.["电话"] || "",
+        idNo: record.fields?.["身份证号"] || "",
+        identity: record.fields?.["人员性质"] || "其他"
+      });
+    });
+
+  const needs = activeNeedRecords.map((record) => {
+    const fields = record.fields || {};
+    const people = peopleByNeed.get(fields["需求ID"]) || [];
+    const [mainPerson = {}, ...companions] = people;
+    return {
+      id: fields["需求ID"] || "",
+      name: mainPerson.name || "",
+      gender: mainPerson.gender || "",
+      phone: mainPerson.phone || "",
+      idNo: mainPerson.idNo || "",
+      identity: mainPerson.identity || "其他",
+      companions,
+      people: Math.max(1, people.length),
+      adults: Math.max(1, people.length),
+      children: 0,
+      checkIn: fields["入住日期"] || "",
+      checkOut: fields["离店日期"] || "",
+      hotel: fields["安排酒店"] || "",
+      roomNo: fields["房间号"] || "",
+      roomType: fields["房间类型"] || "",
+      note: fields["备注"] || "",
+      sameRoom: "是",
+      share: "否",
+      quiet: "否",
+      smokeFree: "否",
+      lowFloor: "否",
+      nearElevator: "否",
+      confirmed: "否"
+    };
+  }).filter((need) => need.id);
+
+  return {
+    ...sampleData,
+    needs,
+    eventDates: Array.from(new Set(needs.flatMap((need) => nightsBetween(need.checkIn, need.checkOut)))).sort()
+  };
+}
+
+async function readCoreState() {
+  const tableIds = await ensureCoreTableIds();
+  const needRecords = await listRecords(tableIds.needTableId);
+  const personRecords = await listRecords(tableIds.personTableId);
+  return { state: stateFromCoreRecords(needRecords, personRecords), tableIds, hasCoreRecords: needRecords.length > 0 };
+}
+
+async function migrateLegacyStateIfNeeded() {
+  const core = await readCoreState();
+  if (core.hasCoreRecords) return core.state;
+
+  const tableId = await ensureSyncTableId();
+  const record = await getSyncRecord(tableId);
+  const raw = record?.fields?.["JSON内容"] || "";
+  const legacyState = raw ? JSON.parse(raw) : sampleData;
+  const legacyNeeds = Array.isArray(legacyState.needs) ? legacyState.needs : [];
+  if (!legacyNeeds.length) return core.state;
+
+  const context = await readCoreWriteContext(core.tableIds);
+  for (const need of legacyNeeds) await upsertNeedCore(need, core.tableIds, context);
+  await recordOperation("迁移", "", `从 ${SYNC_TABLE_NAME} 迁移 ${legacyNeeds.length} 条需求`, core.tableIds);
+  return (await readCoreState()).state;
+}
+
+async function refreshLegacySnapshot(state) {
+  const tableId = await ensureSyncTableId();
+  const record = await getSyncRecord(tableId);
+  if (record?.record_id) {
+    await updateSyncRecord(tableId, record.record_id, state);
+  } else {
+    await createSyncRecord(tableId, state);
+  }
 }
 
 function dateToUtcValue(date) {
@@ -444,38 +714,46 @@ async function syncReadableMirrorTables(state) {
 
 module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return json(res, 200, { ok: true });
-  if (!["GET", "PUT"].includes(req.method)) return json(res, 405, { ok: false, error: "Method not allowed" });
+  if (!["GET", "PUT", "POST"].includes(req.method)) return json(res, 405, { ok: false, error: "Method not allowed" });
 
   try {
-    const tableId = await ensureSyncTableId();
-    const record = await getSyncRecord(tableId);
-
     if (req.method === "GET") {
-      if (!record) {
-        await createSyncRecord(tableId, sampleData);
-        return json(res, 200, { ok: true, state: sampleData, tableId, created: true });
-      }
-      const raw = record.fields?.["JSON内容"] || "";
-      const state = raw ? JSON.parse(raw) : sampleData;
-      return json(res, 200, { ok: true, state, tableId, updatedAt: record.fields?.["最后更新时间"] || "" });
+      const state = await migrateLegacyStateIfNeeded();
+      return json(res, 200, { ok: true, state, source: "core_tables" });
     }
 
     const body = await readJsonBody(req);
-    if (!body?.state || typeof body.state !== "object") {
-      return json(res, 400, { ok: false, error: "缺少 state 数据。" });
-    }
-    if (record) {
-      await updateSyncRecord(tableId, record.record_id, body.state);
+    const tableIds = await ensureCoreTableIds();
+
+    if (body?.action === "upsertNeed") {
+      await upsertNeedCore(body.need, tableIds);
+      await recordOperation("保存需求", body.need?.id || "", "网站保存单条入住需求", tableIds);
+    } else if (body?.action === "upsertNeeds") {
+      const needs = Array.isArray(body.needs) ? body.needs : [];
+      const context = await readCoreWriteContext(tableIds);
+      for (const need of needs) await upsertNeedCore(need, tableIds, context);
+      await recordOperation("批量保存需求", "", `网站批量保存 ${needs.length} 条入住需求`, tableIds);
+    } else if (body?.action === "deleteNeed") {
+      await deleteNeedCore(body.needId, tableIds);
+      await recordOperation("删除需求", body.needId || "", "网站删除入住需求", tableIds);
+    } else if (body?.state && typeof body.state === "object") {
+      const needs = Array.isArray(body.state.needs) ? body.state.needs : [];
+      const context = await readCoreWriteContext(tableIds);
+      for (const need of needs) await upsertNeedCore(need, tableIds, context);
+      await recordOperation("兼容保存", "", `兼容旧接口保存 ${needs.length} 条入住需求`, tableIds);
     } else {
-      await createSyncRecord(tableId, body.state);
+      return json(res, 400, { ok: false, error: "缺少可保存的数据。" });
     }
+
+    const { state } = await readCoreState();
+    await refreshLegacySnapshot(state);
     let mirrorError = "";
     try {
-      await syncReadableMirrorTables(body.state);
+      await syncReadableMirrorTables(state);
     } catch (error) {
       mirrorError = error.message || "飞书查看表同步失败";
     }
-    return json(res, 200, { ok: true, tableId, mirrorError });
+    return json(res, 200, { ok: true, state, source: "core_tables", mirrorError });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "同步失败" });
   }
