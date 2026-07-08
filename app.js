@@ -24,6 +24,8 @@ let saveInFlight = false;
 let saveQueued = false;
 let remoteOperationChain = Promise.resolve();
 let remoteOperationPending = 0;
+let localStateRevision = 0;
+let needsRemoteSaveAfterLoad = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -75,6 +77,7 @@ function loadState() {
 }
 
 function saveState() {
+  markLocalStateChanged();
   localStorage.setItem(storageKey, JSON.stringify(state));
   scheduleRemoteSave();
 }
@@ -90,18 +93,33 @@ function saveLocalStateOnly() {
   localStorage.setItem(storageKey, JSON.stringify(state));
 }
 
+function markLocalStateChanged() {
+  localStateRevision += 1;
+  if (!remoteSyncReady) needsRemoteSaveAfterLoad = true;
+}
+
 async function loadRemoteState() {
   setSyncStatus("正在连接共享数据");
+  const startedAtRevision = localStateRevision;
   try {
     const response = await fetch(syncApiUrl, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
-    if (payload?.state) {
+    const hasLocalChanges = startedAtRevision !== localStateRevision || needsRemoteSaveAfterLoad;
+    if (payload?.state && !hasLocalChanges) {
       state = payload.state;
       saveLocalStateOnly();
     }
     remoteSyncReady = true;
-    setSyncStatus("共享数据已同步", "ok");
+    if (hasLocalChanges) {
+      needsRemoteSaveAfterLoad = false;
+      saveQueued = true;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(syncStateToRemote, 0);
+      setSyncStatus("正在保存共享数据");
+    } else {
+      setSyncStatus("共享数据已同步", "ok");
+    }
     return true;
   } catch (error) {
     remoteSyncReady = false;
@@ -120,6 +138,7 @@ function scheduleRemoteSave() {
 
 async function syncStateToRemote() {
   if (!remoteSyncReady || saveInFlight || !saveQueued) return;
+  const startedAtRevision = localStateRevision;
   saveQueued = false;
   saveInFlight = true;
   setSyncStatus("正在保存共享数据");
@@ -130,6 +149,12 @@ async function syncStateToRemote() {
       body: JSON.stringify({ state })
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json().catch(() => ({}));
+    if (result?.state && startedAtRevision === localStateRevision) {
+      state = result.state;
+      saveLocalStateOnly();
+      render();
+    }
     remoteSyncReady = true;
     setSyncStatus("共享数据已保存", "ok");
   } catch (error) {
@@ -180,16 +205,19 @@ async function syncOperationToRemote(payload) {
 }
 
 function saveNeedState(need) {
+  markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({ action: "upsertNeed", need });
 }
 
 function saveNeedsState(needs) {
+  markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({ action: "upsertNeeds", needs });
 }
 
 function deleteNeedState(needId) {
+  markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({ action: "deleteNeed", needId });
 }
