@@ -861,8 +861,7 @@ function parseHtmlTable(text) {
   )).filter((row) => row.some(Boolean));
 }
 
-function parseRoomBatchRows(text) {
-  const rows = /<table[\s>]/i.test(text) ? parseHtmlTable(text) : parseCsv(text);
+function rowsToBatchRecords(rows) {
   if (rows.length < 2) return [];
   const headers = rows[0].map((item) => item.trim());
   return rows.slice(1).map((row) => {
@@ -874,8 +873,163 @@ function parseRoomBatchRows(text) {
   }).filter((record) => Object.values(record).some(Boolean));
 }
 
+function parseRoomBatchRows(text) {
+  const rows = /<table[\s>]/i.test(text) ? parseHtmlTable(text) : parseCsv(text);
+  return rowsToBatchRecords(rows);
+}
+
+function columnNameToIndex(name) {
+  return String(name || "").toUpperCase().split("").reduce((sum, char) => (
+    sum * 26 + char.charCodeAt(0) - 64
+  ), 0) - 1;
+}
+
+function xmlChildren(node, tagName) {
+  return Array.from(node.getElementsByTagName(tagName));
+}
+
+function xmlTextContent(node, tagName) {
+  const item = xmlChildren(node, tagName)[0];
+  return item ? item.textContent || "" : "";
+}
+
+function normalizeXlsxPath(target) {
+  const text = String(target || "").replace(/^\/+/, "");
+  if (text.startsWith("xl/")) return text;
+  return `xl/${text}`.replaceAll("/./", "/");
+}
+
+function findEndOfCentralDirectory(view) {
+  for (let offset = view.byteLength - 22; offset >= 0; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) return offset;
+  }
+  throw new Error("没有找到有效的 xlsx 文件结构。");
+}
+
+function readZipDirectory(buffer) {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const decoder = new TextDecoder();
+  const endOffset = findEndOfCentralDirectory(view);
+  const entryCount = view.getUint16(endOffset + 10, true);
+  let offset = view.getUint32(endOffset + 16, true);
+  const entries = new Map();
+
+  for (let index = 0; index < entryCount; index += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) break;
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const nameStart = offset + 46;
+    const name = decoder.decode(bytes.slice(nameStart, nameStart + nameLength));
+
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    entries.set(name, {
+      method,
+      data: bytes.slice(dataStart, dataStart + compressedSize)
+    });
+    offset = nameStart + nameLength + extraLength + commentLength;
+  }
+
+  return entries;
+}
+
+async function inflateRaw(data) {
+  if (!window.DecompressionStream) {
+    throw new Error("当前浏览器不支持直接读取 xlsx，请使用新版 Chrome 或上传 xls/csv。");
+  }
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function zipEntryText(entries, path) {
+  const entry = entries.get(path);
+  if (!entry) return "";
+  let data = entry.data;
+  if (entry.method === 8) data = await inflateRaw(data);
+  if (entry.method !== 0 && entry.method !== 8) {
+    throw new Error("暂不支持这个 xlsx 文件的压缩格式。");
+  }
+  return new TextDecoder().decode(data);
+}
+
+function parseSharedStrings(xml) {
+  if (!xml) return [];
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  return xmlChildren(doc, "si").map((item) => (
+    xmlChildren(item, "t").map((textNode) => textNode.textContent || "").join("")
+  ));
+}
+
+async function xlsxWorksheetPath(entries, preferredNames = ["上传需求汇总"]) {
+  const workbookXml = await zipEntryText(entries, "xl/workbook.xml");
+  const relsXml = await zipEntryText(entries, "xl/_rels/workbook.xml.rels");
+  const workbookDoc = new DOMParser().parseFromString(workbookXml, "application/xml");
+  const relsDoc = new DOMParser().parseFromString(relsXml, "application/xml");
+  const rels = new Map(xmlChildren(relsDoc, "Relationship").map((rel) => [
+    rel.getAttribute("Id"),
+    normalizeXlsxPath(rel.getAttribute("Target"))
+  ]));
+  const sheets = xmlChildren(workbookDoc, "sheet").map((sheet) => ({
+    name: sheet.getAttribute("name") || "",
+    relId: sheet.getAttribute("r:id") || sheet.getAttribute("id") || ""
+  }));
+  const preferred = sheets.find((sheet) => preferredNames.includes(sheet.name)) || sheets.find((sheet) => sheet.name !== "检查结果") || sheets[0];
+  const path = rels.get(preferred?.relId);
+  if (!path) throw new Error("没有找到 xlsx 里的工作表。");
+  return path;
+}
+
+function xlsxCellValue(cell, sharedStrings) {
+  const type = cell.getAttribute("t") || "";
+  const rawValue = xmlTextContent(cell, "v");
+  if (type === "s") return sharedStrings[Number(rawValue)] || "";
+  if (type === "inlineStr") return xmlChildren(cell, "t").map((item) => item.textContent || "").join("");
+  if (type === "b") return rawValue === "1" ? "TRUE" : "FALSE";
+  return rawValue || "";
+}
+
+function parseWorksheetRows(xml, sharedStrings) {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  return xmlChildren(doc, "row").map((row) => {
+    const values = [];
+    xmlChildren(row, "c").forEach((cell, fallbackIndex) => {
+      const ref = cell.getAttribute("r") || "";
+      const colMatch = ref.match(/[A-Z]+/i);
+      const index = colMatch ? columnNameToIndex(colMatch[0]) : fallbackIndex;
+      values[index] = xlsxCellValue(cell, sharedStrings).trim();
+    });
+    return values.map((value) => value || "");
+  }).filter((row) => row.some(Boolean));
+}
+
+async function parseXlsxBatchRows(file) {
+  const entries = readZipDirectory(await file.arrayBuffer());
+  const sharedStrings = parseSharedStrings(await zipEntryText(entries, "xl/sharedStrings.xml"));
+  const worksheetPath = await xlsxWorksheetPath(entries);
+  return parseWorksheetRows(await zipEntryText(entries, worksheetPath), sharedStrings);
+}
+
+async function parseBatchRecordsFromFile(file) {
+  const isXlsx = /\.xlsx$/i.test(file.name) || file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (isXlsx) return rowsToBatchRecords(await parseXlsxBatchRows(file));
+  return parseRoomBatchRows(await file.text());
+}
+
 function normalizeDateValue(value) {
   const text = String(value || "").trim().replaceAll("/", "-").replaceAll(".", "-");
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const serial = Number(text);
+    if (serial >= 20000 && serial <= 80000) {
+      const date = new Date(Math.round((serial - 25569) * 86400000));
+      return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    }
+  }
   const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (!match) return "";
   return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
@@ -1095,8 +1249,7 @@ function needFromBatchRecord(record, index) {
 }
 
 async function importRoomBatch(file) {
-  const text = await file.text();
-  const records = parseRoomBatchRows(text);
+  const records = await parseBatchRecordsFromFile(file);
   if (!records.length) {
     alert("没有识别到可导入的房间数据，请使用下载模板填写后再上传。");
     return;
@@ -1121,8 +1274,7 @@ async function importRoomBatch(file) {
 }
 
 async function importNeedBatch(file) {
-  const text = await file.text();
-  const records = parseRoomBatchRows(text);
+  const records = await parseBatchRecordsFromFile(file);
   if (!records.length) {
     alert("没有识别到可导入的入住需求，请使用下载模板填写后再上传。");
     return;
