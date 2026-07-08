@@ -230,7 +230,24 @@ async function ensureCoreTableIds() {
 
 async function upsertReadableRecords(tableId, keyField, rows) {
   const existingRecords = await listRecords(tableId);
-  const existingByKey = new Map(existingRecords.map((record) => [String(record.fields?.[keyField] || ""), record]));
+  const duplicateRecordIds = new Set();
+  const groupedExisting = new Map();
+  existingRecords.forEach((record) => {
+    const key = String(record.fields?.[keyField] || "");
+    if (!key) return;
+    if (!groupedExisting.has(key)) groupedExisting.set(key, []);
+    groupedExisting.get(key).push(record);
+  });
+  for (const group of groupedExisting.values()) {
+    if (group.length <= 1) continue;
+    for (const duplicate of group.slice(1)) {
+      await feishu("DELETE", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${duplicate.record_id}`);
+      duplicateRecordIds.add(duplicate.record_id);
+    }
+  }
+
+  const uniqueExistingRecords = existingRecords.filter((record) => !duplicateRecordIds.has(record.record_id));
+  const existingByKey = new Map(uniqueExistingRecords.map((record) => [String(record.fields?.[keyField] || ""), record]));
   const incomingKeys = new Set(rows.map((row) => String(row[keyField] || "")));
 
   for (const row of rows) {
@@ -244,7 +261,7 @@ async function upsertReadableRecords(tableId, keyField, rows) {
     }
   }
 
-  for (const record of existingRecords) {
+  for (const record of uniqueExistingRecords) {
     const key = String(record.fields?.[keyField] || "");
     if (key && !incomingKeys.has(key)) {
       await feishu("DELETE", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${record.record_id}`);

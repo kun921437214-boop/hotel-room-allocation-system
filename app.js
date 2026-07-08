@@ -368,8 +368,12 @@ async function ensureRemoteForUpload() {
   if (!loaded) throw new Error("共享数据未连接，请稍后再试。");
 }
 
+function refreshReadableViewsInBackground() {
+  syncUploadPayload({ action: "refreshViews" }).catch(() => {});
+}
+
 async function refreshSharedStateAfterUpload() {
-  const result = await syncUploadPayload({ action: "refreshViews" });
+  const result = await syncUploadPayload({ action: "cleanupDuplicates" });
   if (result?.state) {
     state = result.state;
     saveLocalStateOnly();
@@ -377,6 +381,7 @@ async function refreshSharedStateAfterUpload() {
   }
   remoteSyncReady = true;
   setSyncStatus("共享数据已保存", "ok");
+  refreshReadableViewsInBackground();
 }
 
 async function uploadNeedTaskOnce(task) {
@@ -393,7 +398,7 @@ async function uploadNeedTaskOnce(task) {
     savePendingUploadTask(task);
     setUploadProgress(`上传 ${task.nextIndex} / ${task.total}`);
   }
-  setUploadProgress("正在生成统计");
+  setUploadProgress("正在确认数据");
   await refreshSharedStateAfterUpload();
   clearPendingUploadTask();
   render();
