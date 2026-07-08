@@ -7,15 +7,16 @@ const PERSON_TABLE_NAME = "住宿人员明细表";
 const OPERATION_TABLE_NAME = "操作记录表";
 const ACTIVE_READABLE_TABLE_NAMES = ["住宿人员名单", "酒店统计查看", "角色统计查看"];
 const OBSOLETE_READABLE_TABLE_NAMES = ["入住需求查看", "酒店房间查看", "分房记录查看", "变更记录查看"];
-const ARRANGEMENT_HOTELS = ["汉庭", "如家", "万豪"];
+const ARRANGEMENT_HOTELS = ["诺富特", "宜必思", "施柏阁", "大观"];
 const IDENTITY_OPTIONS = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const ROOM_TYPE_FIELDS = ["双标", "大床", "套房", "其他"];
 
 const sampleData = {
   hotels: [
-    { id: "汉庭酒店", name: "汉庭酒店", address: "", contact: "", phone: "" },
-    { id: "如家酒店", name: "如家酒店", address: "", contact: "", phone: "" },
-    { id: "万豪酒店", name: "万豪酒店", address: "", contact: "", phone: "" }
+    { id: "诺富特", name: "诺富特", address: "", contact: "", phone: "" },
+    { id: "宜必思", name: "宜必思", address: "", contact: "", phone: "" },
+    { id: "施柏阁", name: "施柏阁", address: "", contact: "", phone: "" },
+    { id: "大观", name: "大观", address: "", contact: "", phone: "" }
   ],
   rooms: [],
   needs: [],
@@ -451,7 +452,7 @@ function stateFromCoreRecords(needRecords, personRecords) {
       children: 0,
       checkIn: fields["入住日期"] || "",
       checkOut: fields["离店日期"] || "",
-      hotel: fields["安排酒店"] || "",
+      hotel: normalizedNeedHotel(fields["安排酒店"]),
       roomNo: fields["房间号"] || "",
       roomType: fields["房间类型"] || "",
       note: fields["备注"] || "",
@@ -535,9 +536,13 @@ function stayDayCount(need) {
 }
 
 function normalizedNeedHotel(hotel) {
-  if (hotel === "汉庭酒店") return "汉庭";
-  if (hotel === "如家酒店") return "如家";
-  if (hotel === "万豪酒店") return "万豪";
+  if (hotel === "汉庭酒店" || hotel === "汉庭") return "诺富特";
+  if (hotel === "如家酒店" || hotel === "如家") return "宜必思";
+  if (hotel === "万豪酒店" || hotel === "万豪") return "施柏阁";
+  if (hotel === "诺富特酒店") return "诺富特";
+  if (hotel === "宜必思酒店") return "宜必思";
+  if (hotel === "施柏阁酒店") return "施柏阁";
+  if (hotel === "大观酒店") return "大观";
   return hotel || "";
 }
 

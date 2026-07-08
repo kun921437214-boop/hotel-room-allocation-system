@@ -3,9 +3,10 @@ const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
 
 const sampleData = {
   hotels: [
-    { id: "汉庭酒店", name: "汉庭酒店", address: "", contact: "", phone: "" },
-    { id: "如家酒店", name: "如家酒店", address: "", contact: "", phone: "" },
-    { id: "万豪酒店", name: "万豪酒店", address: "", contact: "", phone: "" }
+    { id: "诺富特", name: "诺富特", address: "", contact: "", phone: "" },
+    { id: "宜必思", name: "宜必思", address: "", contact: "", phone: "" },
+    { id: "施柏阁", name: "施柏阁", address: "", contact: "", phone: "" },
+    { id: "大观", name: "大观", address: "", contact: "", phone: "" }
   ],
   rooms: [],
   needs: [],
@@ -205,9 +206,13 @@ function hotelName(id) {
 }
 
 function normalizedNeedHotel(hotel) {
-  if (hotel === "汉庭酒店") return "汉庭";
-  if (hotel === "如家酒店") return "如家";
-  if (hotel === "万豪酒店") return "万豪";
+  if (hotel === "汉庭酒店" || hotel === "汉庭") return "诺富特";
+  if (hotel === "如家酒店" || hotel === "如家") return "宜必思";
+  if (hotel === "万豪酒店" || hotel === "万豪") return "施柏阁";
+  if (hotel === "诺富特酒店") return "诺富特";
+  if (hotel === "宜必思酒店") return "宜必思";
+  if (hotel === "施柏阁酒店") return "施柏阁";
+  if (hotel === "大观酒店") return "大观";
   return hotel || "";
 }
 
@@ -533,7 +538,7 @@ const roomTypeOptions = ["双标", "大床", "套房"];
 const roomUseOptions = ["未分配", "自己人", "工作人员", "导师", "嘉宾", "选手家庭", "合作方", "备用", "其他"];
 const needBatchHeaders = ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "安排酒店", "房间类型", "房间号", "入住日期", "离店日期", "备注"];
 const identityOptions = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
-const arrangementHotelOptions = ["汉庭", "如家", "万豪"];
+const arrangementHotelOptions = ["诺富特", "宜必思", "施柏阁", "大观"];
 const defaultHotelInfoRange = { start: "2026-07-29", end: "2026-08-06" };
 
 function escapeHtml(value) {
@@ -559,8 +564,8 @@ function downloadBlob(filename, content, type) {
 function downloadRoomTemplate() {
   const rows = [
     roomBatchHeaders,
-    ["汉庭酒店", "1001", "1", "双床房", "2", "2026-08-01", "2026-08-06", "未分配"],
-    ["如家酒店", "2001", "2", "三人间", "3", "2026-08-01", "2026-08-06", "备用"]
+    ["诺富特", "1001", "1", "双标", "2", "2026-08-01", "2026-08-06", "未分配"],
+    ["宜必思", "2001", "2", "大床", "2", "2026-08-01", "2026-08-06", "备用"]
   ];
   const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
@@ -570,9 +575,9 @@ function downloadRoomTemplate() {
 function downloadNeedTemplate() {
   const rows = [
     needBatchHeaders,
-    ["1", "姓名1", "男", "手机号1", "身份证号1", "工作人员", "汉庭", "双标", "1001", "2026/8/1", "2026/8/6", "房间大一点"],
-    ["1", "姓名2", "男", "手机号2", "身份证号2", "工作人员", "汉庭", "双标", "1001", "2026/8/1", "2026/8/6", "房间大一点"],
-    ["2", "姓名3", "女", "手机号3", "身份证号3", "评委", "万豪", "大床", "2001", "2026/8/2", "2026/8/5", "需要安静"]
+    ["1", "姓名1", "男", "手机号1", "身份证号1", "工作人员", "诺富特", "双标", "1001", "2026/8/1", "2026/8/6", "房间大一点"],
+    ["1", "姓名2", "男", "手机号2", "身份证号2", "工作人员", "诺富特", "双标", "1001", "2026/8/1", "2026/8/6", "房间大一点"],
+    ["2", "姓名3", "女", "手机号3", "身份证号3", "评委", "施柏阁", "大床", "2001", "2026/8/2", "2026/8/5", "需要安静"]
   ];
   const tableHtml = rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("");
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${tableHtml}</table></body></html>`;
