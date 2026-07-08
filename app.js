@@ -206,22 +206,40 @@ async function syncOperationToRemote(payload) {
   }
 }
 
-function saveNeedState(need) {
+function saveNeedState(need, meta = {}) {
   markLocalStateChanged();
   saveLocalStateOnly();
-  queueRemoteOperation({ action: "upsertNeed", need });
+  queueRemoteOperation({
+    action: "upsertNeed",
+    need,
+    operationType: meta.operationType,
+    operationDescription: meta.operationDescription,
+    batchId: need.uploadBatchId || ""
+  });
 }
 
-function saveNeedsState(needs) {
+function saveNeedsState(needs, meta = {}) {
   markLocalStateChanged();
   saveLocalStateOnly();
-  queueRemoteOperation({ action: "upsertNeeds", needs });
+  queueRemoteOperation({
+    action: "upsertNeeds",
+    needs,
+    operationType: meta.operationType,
+    operationDescription: meta.operationDescription,
+    batchId: meta.batchId || ""
+  });
 }
 
-function deleteNeedState(needId) {
+function deleteNeedState(needId, meta = {}) {
   markLocalStateChanged();
   saveLocalStateOnly();
-  queueRemoteOperation({ action: "deleteNeed", needId });
+  queueRemoteOperation({
+    action: "deleteNeed",
+    needId,
+    operationType: meta.operationType,
+    operationDescription: meta.operationDescription,
+    batchId: meta.batchId || ""
+  });
 }
 
 function randomToken(length = 8) {
@@ -237,6 +255,12 @@ function uploadTaskId() {
   return `UPLOAD-${dateToValue(new Date()).replaceAll("-", "")}-${Date.now().toString(36)}-${randomToken(5)}`;
 }
 
+function uploadBatchName(createdAt = new Date().toISOString()) {
+  const date = createdAt.slice(0, 10);
+  const time = createdAt.slice(11, 16);
+  return `${date} ${time} 上传批次`;
+}
+
 function uploadNeedId(taskId, index) {
   return `REQ-${taskId.replace("UPLOAD-", "")}-${String(index + 1).padStart(3, "0")}-${randomToken(4)}`;
 }
@@ -247,15 +271,21 @@ function peopleCountForNeeds(needs) {
 
 function createNeedUploadTask(needs) {
   const id = uploadTaskId();
+  const createdAt = new Date().toISOString();
+  const batchName = uploadBatchName(createdAt);
   return {
     id,
-    createdAt: new Date().toISOString(),
+    batchName,
+    createdAt,
     nextIndex: 0,
     total: needs.length,
     peopleTotal: peopleCountForNeeds(needs),
     needs: needs.map((need, index) => ({
       ...need,
       id: uploadNeedId(id, index),
+      uploadBatchId: id,
+      uploadBatchName: batchName,
+      uploadBatchTime: createdAt,
       companions: Array.isArray(need.companions) ? need.companions : []
     }))
   };
@@ -315,6 +345,7 @@ function uploadTaskMeta(task) {
   const saved = Math.min(task.nextIndex || 0, task.total || task.needs?.length || 0);
   const remaining = Math.max(0, (task.total || task.needs?.length || 0) - saved);
   return [
+    `<span>上传批次：${escapeHtml(task.batchName || task.id || "")}</span>`,
     `<span>总需求：${task.total || task.needs?.length || 0} 条</span>`,
     `<span>总人数：${task.peopleTotal || peopleCountForNeeds(task.needs || [])} 人</span>`,
     `<span>已保存：${saved} 条</span>`,
@@ -390,7 +421,15 @@ async function uploadNeedTaskOnce(task) {
   savePendingUploadTask(task);
   setUploadProgress(`上传 0 / ${task.total}`);
   setSyncStatus("正在批量保存共享数据");
-  await syncUploadPayload({ action: "upsertNeeds", needs: task.needs });
+  await syncUploadPayload({
+    action: "upsertNeeds",
+    needs: task.needs,
+    batchId: task.id,
+    batchName: task.batchName,
+    uploadBatchTime: task.createdAt,
+    operationType: "批量上传需求",
+    operationDescription: `${task.batchName || task.id} 上传 ${task.total} 条住宿需求，${task.peopleTotal} 人`
+  });
   task.nextIndex = task.total;
   savePendingUploadTask(task);
   setUploadProgress(`上传 ${task.nextIndex} / ${task.total}`);
@@ -409,7 +448,14 @@ async function rollbackUploadTask(task) {
   const ids = (task.needs || []).map((need) => need.id).filter(Boolean);
   await ensureRemoteForUpload();
   setUploadProgress(`正在取消 ${ids.length} / ${ids.length}`);
-  await syncUploadPayload({ action: "deleteNeeds", needIds: ids, deferMirror: true });
+  await syncUploadPayload({
+    action: "deleteNeeds",
+    needIds: ids,
+    deferMirror: true,
+    batchId: task.id,
+    operationType: "撤回上传批次",
+    operationDescription: `${task.batchName || task.id} 撤回 ${ids.length} 条住宿需求`
+  });
   await refreshSharedStateAfterUpload();
   clearPendingUploadTask();
   setUploadProgress("");
@@ -2564,7 +2610,12 @@ function bindEvents() {
       const need = { id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) };
       state.needs.push(need);
       addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
-      return { type: "need", need };
+      return {
+        type: "need",
+        need,
+        operationType: "新增需求",
+        operationDescription: `网站新增入住需求：${need.name || need.id}`
+      };
     });
   });
   $("#downloadNeedTemplateBtn").addEventListener("click", downloadNeedTemplate);
@@ -2700,7 +2751,11 @@ function bindEvents() {
       if (!need) return;
       if (!confirm(`确定删除 ${need.name || "这条入住需求"} 吗？`)) return;
       state.needs = state.needs.filter((item) => item.id !== need.id);
-      deleteNeedState(need.id);
+      deleteNeedState(need.id, {
+        operationType: "删除需求",
+        operationDescription: `网站删除入住需求：${need.name || need.id}`,
+        batchId: need.uploadBatchId || ""
+      });
       render();
       return;
     }
@@ -2721,7 +2776,12 @@ function bindEvents() {
         validateOptionalStayDates(values.checkIn, values.checkOut, "入住需求");
         Object.assign(need, normalizeNeedValues(values));
         addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
-        return { type: "need", need };
+        return {
+          type: "need",
+          need,
+          operationType: "编辑需求",
+          operationDescription: `网站编辑入住需求：${need.name || need.id}`
+        };
       });
     }
     if (roomBtn) {
@@ -2755,7 +2815,10 @@ function bindEvents() {
       return;
     }
     if (result?.type === "need") {
-      saveNeedState(result.need);
+      saveNeedState(result.need, {
+        operationType: result.operationType,
+        operationDescription: result.operationDescription
+      });
     } else {
       saveState();
     }

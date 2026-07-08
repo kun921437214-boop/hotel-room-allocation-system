@@ -5,6 +5,7 @@ const SYNC_RECORD_KEY = process.env.FEISHU_SYNC_RECORD_KEY || "hotel-room-state-
 const NEED_TABLE_NAME = "住宿需求核心表";
 const PERSON_TABLE_NAME = "住宿人员明细表";
 const OPERATION_TABLE_NAME = "操作记录表";
+const BACKUP_TABLE_NAME = "每日备份表";
 const ACTIVE_READABLE_TABLE_NAMES = ["住宿人员名单", "酒店统计查看", "角色统计查看"];
 const OBSOLETE_READABLE_TABLE_NAMES = ["入住需求查看", "酒店房间查看", "分房记录查看", "变更记录查看"];
 const ARRANGEMENT_HOTELS = ["诺富特", "宜必思", "施柏阁", "大观"];
@@ -280,15 +281,17 @@ async function batchDeleteRecords(tableId, recordIds) {
   }
 }
 
-const NEED_FIELDS = ["需求ID", "入住日期", "离店日期", "安排酒店", "房间号", "房间类型", "备注", "创建时间", "更新时间", "是否删除"];
-const PERSON_FIELDS = ["人员ID", "需求ID", "顺序", "姓名", "性别", "电话", "身份证号", "人员性质", "是否主人员", "更新时间", "是否删除"];
-const OPERATION_FIELDS = ["操作ID", "操作时间", "操作类型", "需求ID", "操作人", "说明"];
+const NEED_FIELDS = ["需求ID", "入住日期", "离店日期", "安排酒店", "房间号", "房间类型", "备注", "上传批次", "上传时间", "创建时间", "更新时间", "是否删除"];
+const PERSON_FIELDS = ["人员ID", "需求ID", "顺序", "姓名", "性别", "电话", "身份证号", "人员性质", "是否主人员", "上传批次", "更新时间", "是否删除"];
+const OPERATION_FIELDS = ["操作ID", "操作时间", "操作类型", "需求ID", "上传批次", "影响条数", "操作人", "说明"];
+const BACKUP_FIELDS = ["备份日期", "备份时间", "需求数", "人数", "间夜", "JSON内容", "说明"];
 
 async function ensureCoreTableIds() {
   const needTableId = await ensureCoreTable(NEED_TABLE_NAME, NEED_FIELDS);
   const personTableId = await ensureCoreTable(PERSON_TABLE_NAME, PERSON_FIELDS);
   const operationTableId = await ensureCoreTable(OPERATION_TABLE_NAME, OPERATION_FIELDS);
-  return { needTableId, personTableId, operationTableId };
+  const backupTableId = await ensureCoreTable(BACKUP_TABLE_NAME, BACKUP_FIELDS);
+  return { needTableId, personTableId, operationTableId, backupTableId };
 }
 
 async function upsertReadableRecords(tableId, keyField, rows) {
@@ -364,6 +367,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function todayKey() {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 function coreKeyMap(records, keyField) {
   return new Map(records.map((record) => [String(record.fields?.[keyField] || ""), record]).filter(([key]) => key));
 }
@@ -424,6 +431,8 @@ async function cleanupDuplicateCoreRecords(tableIds) {
 
 function needCoreFields(need, existingFields = {}) {
   const updatedAt = nowIso();
+  const uploadBatch = need.uploadBatchId || need.uploadBatchName || existingFields["上传批次"] || "";
+  const uploadTime = need.uploadBatchTime || existingFields["上传时间"] || "";
   return {
     "需求ID": need.id || "",
     "入住日期": need.checkIn || "",
@@ -432,6 +441,8 @@ function needCoreFields(need, existingFields = {}) {
     "房间号": need.roomNo || "",
     "房间类型": need.roomType || "",
     "备注": need.note || "",
+    "上传批次": uploadBatch,
+    "上传时间": uploadTime,
     "创建时间": existingFields["创建时间"] || need.createdAt || updatedAt,
     "更新时间": updatedAt,
     "是否删除": "否"
@@ -449,6 +460,7 @@ function needPeopleRows(need) {
     "身份证号": person.idNo || "",
     "人员性质": personIdentity(person, need.identity),
     "是否主人员": index === 0 ? "是" : "否",
+    "上传批次": need.uploadBatchId || need.uploadBatchName || "",
     "更新时间": nowIso(),
     "是否删除": "否"
   }));
@@ -633,7 +645,7 @@ async function deleteNeedsCore(needIds, tableIds) {
   await batchUpdateRecords(personTableId, personUpdates);
 }
 
-async function recordOperation(type, needId, description, tableIds) {
+async function recordOperation(type, needId, description, tableIds, options = {}) {
   const { operationTableId } = tableIds || await ensureCoreTableIds();
   const id = `OP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${operationTableId}/records`, {
@@ -642,10 +654,52 @@ async function recordOperation(type, needId, description, tableIds) {
       "操作时间": nowIso(),
       "操作类型": type,
       "需求ID": needId || "",
+      "上传批次": options.batchId || "",
+      "影响条数": String(options.count || ""),
       "操作人": "网站",
       "说明": description || ""
     }
   });
+}
+
+function stateSummary(state) {
+  const needs = Array.isArray(state?.needs) ? state.needs : [];
+  return {
+    needCount: needs.length,
+    peopleCount: needs.reduce((sum, need) => sum + peopleForNeed(need).length, 0),
+    nightCount: needs.reduce((sum, need) => sum + nightsBetween(need.checkIn, need.checkOut).length, 0)
+  };
+}
+
+async function upsertDailyBackup(state, tableIds, reason = "网站自动每日备份") {
+  const { backupTableId } = tableIds || await ensureCoreTableIds();
+  const date = todayKey();
+  const summary = stateSummary(state);
+  const fields = {
+    "备份日期": date,
+    "备份时间": nowIso(),
+    "需求数": String(summary.needCount),
+    "人数": String(summary.peopleCount),
+    "间夜": String(summary.nightCount),
+    "JSON内容": JSON.stringify(state),
+    "说明": reason
+  };
+  const records = await listRecords(backupTableId);
+  const existing = records.find((record) => String(record.fields?.["备份日期"] || "") === date);
+  if (existing?.record_id) {
+    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records/${existing.record_id}`, { fields });
+  } else {
+    await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records`, { fields });
+    await recordOperation("每日备份", "", `${date} 已生成每日备份`, tableIds, { count: summary.needCount });
+  }
+}
+
+async function tryDailyBackup(state, tableIds, reason) {
+  try {
+    await upsertDailyBackup(state, tableIds, reason);
+  } catch {
+    // 备份失败不阻断日常录入和同步，操作记录表里仍保留核心动作。
+  }
 }
 
 function stateFromCoreRecords(needRecords, personRecords) {
@@ -688,6 +742,9 @@ function stateFromCoreRecords(needRecords, personRecords) {
       roomNo: fields["房间号"] || "",
       roomType: fields["房间类型"] || "",
       note: fields["备注"] || "",
+      uploadBatchId: fields["上传批次"] || "",
+      uploadBatchName: fields["上传批次"] || "",
+      uploadBatchTime: fields["上传时间"] || "",
       sameRoom: "是",
       share: "否",
       quiet: "否",
@@ -864,7 +921,8 @@ function personListRows(state) {
         "安排酒店": normalizedNeedHotel(need.hotel),
         "房间号": need.roomNo || "",
         "房间类型": need.roomType || "",
-        "备注": need.note || ""
+        "备注": need.note || "",
+        "上传批次": need.uploadBatchId || need.uploadBatchName || ""
       });
       sequence += 1;
     });
@@ -913,7 +971,7 @@ function readableMirrorTables(state) {
     {
       name: "住宿人员名单",
       keyField: "序号",
-      fields: ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "房间类型", "备注"],
+      fields: ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "房间类型", "备注", "上传批次"],
       rows: personListRows(state)
     },
     {
@@ -956,6 +1014,7 @@ module.exports = async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const state = await migrateLegacyStateIfNeeded();
+      await tryDailyBackup(state, null, "打开网站时自动备份");
       return json(res, 200, { ok: true, state, source: "core_tables" });
     }
 
@@ -967,24 +1026,82 @@ module.exports = async function handler(req, res) {
 
     if (body?.action === "upsertNeed") {
       await upsertNeedCore(body.need, tableIds);
-      if (!deferMirror) await recordOperation("保存需求", body.need?.id || "", "网站保存单条入住需求", tableIds);
+      if (!deferMirror) {
+        await recordOperation(
+          body.operationType || "保存需求",
+          body.need?.id || "",
+          body.operationDescription || "网站保存单条入住需求",
+          tableIds,
+          { batchId: body.batchId || body.need?.uploadBatchId || "", count: 1 }
+        );
+      }
     } else if (body?.action === "upsertNeeds") {
       const needs = Array.isArray(body.needs) ? body.needs : [];
-      const result = await upsertNeedsCore(needs, tableIds);
-      if (deferMirror) return json(res, 200, { ok: true, savedCount: result.savedNeeds, savedPeople: result.savedPeople, deferred: true });
-      await recordOperation("批量保存需求", "", `网站批量保存 ${result.savedNeeds} 条入住需求，${result.savedPeople} 人`, tableIds);
+      const uploadTime = body.uploadBatchTime || nowIso();
+      const needsWithBatch = needs.map((need) => ({
+        ...need,
+        uploadBatchId: need.uploadBatchId || body.batchId || "",
+        uploadBatchName: need.uploadBatchName || body.batchName || body.batchId || "",
+        uploadBatchTime: need.uploadBatchTime || uploadTime
+      }));
+      const result = await upsertNeedsCore(needsWithBatch, tableIds);
+      if (deferMirror) {
+        if (body.operationType) {
+          await recordOperation(
+            body.operationType,
+            "",
+            body.operationDescription || `网站批量保存 ${result.savedNeeds} 条入住需求，${result.savedPeople} 人`,
+            tableIds,
+            { batchId: body.batchId || "", count: result.savedNeeds }
+          );
+        }
+        return json(res, 200, { ok: true, savedCount: result.savedNeeds, savedPeople: result.savedPeople, deferred: true });
+      }
+      await recordOperation(
+        body.operationType || "批量保存需求",
+        "",
+        body.operationDescription || `网站批量保存 ${result.savedNeeds} 条入住需求，${result.savedPeople} 人`,
+        tableIds,
+        { batchId: body.batchId || "", count: result.savedNeeds }
+      );
     } else if (body?.action === "deleteNeed") {
       await deleteNeedCore(body.needId, tableIds);
-      if (!deferMirror) await recordOperation("删除需求", body.needId || "", "网站删除入住需求", tableIds);
+      if (!deferMirror) {
+        await recordOperation(
+          body.operationType || "删除需求",
+          body.needId || "",
+          body.operationDescription || "网站删除入住需求",
+          tableIds,
+          { batchId: body.batchId || "", count: 1 }
+        );
+      }
     } else if (body?.action === "deleteNeeds") {
       const needIds = Array.isArray(body.needIds) ? body.needIds : [];
       await deleteNeedsCore(needIds, tableIds);
-      if (deferMirror) return json(res, 200, { ok: true, deletedCount: needIds.length, deferred: true });
-      await recordOperation("批量删除需求", "", `网站批量删除 ${needIds.length} 条入住需求`, tableIds);
+      if (deferMirror) {
+        if (body.operationType) {
+          await recordOperation(
+            body.operationType,
+            "",
+            body.operationDescription || `网站批量删除 ${needIds.length} 条入住需求`,
+            tableIds,
+            { batchId: body.batchId || "", count: needIds.length }
+          );
+        }
+        return json(res, 200, { ok: true, deletedCount: needIds.length, deferred: true });
+      }
+      await recordOperation(
+        body.operationType || "批量删除需求",
+        "",
+        body.operationDescription || `网站批量删除 ${needIds.length} 条入住需求`,
+        tableIds,
+        { batchId: body.batchId || "", count: needIds.length }
+      );
     } else if (body?.action === "cleanupDuplicates") {
       cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
       const { state } = await readCoreState();
       await refreshLegacySnapshot(state);
+      await tryDailyBackup(state, tableIds, "清理重复数据后自动备份");
       return json(res, 200, { ok: true, state, source: "core_tables", cleanup: cleanupResult });
     } else if (body?.action === "refreshViews") {
       cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
@@ -999,6 +1116,7 @@ module.exports = async function handler(req, res) {
 
     const { state } = await readCoreState();
     await refreshLegacySnapshot(state);
+    await tryDailyBackup(state, tableIds, "保存数据后自动备份");
     let mirrorError = "";
     if (shouldSyncReadableViews) {
       try {
