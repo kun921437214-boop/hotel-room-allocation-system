@@ -1,7 +1,8 @@
 const storageKey = "hotelRoomOpsLocalSystem.v5.roomAvailability";
 const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
 const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
-const needUploadChunkSize = 10;
+const needUploadChunkSize = 1;
+const needRollbackChunkSize = 5;
 
 const sampleData = {
   hotels: [
@@ -40,7 +41,7 @@ function defaultDate(offset = 0) {
 }
 
 function activeDates() {
-  const needDates = Array.from(new Set(state.needs.flatMap((need) => nightsBetween(need.checkIn, need.checkOut)))).sort();
+  const needDates = Array.from(new Set(visibleNeeds().flatMap((need) => nightsBetween(need.checkIn, need.checkOut)))).sort();
   if (needDates.length) return needDates;
   return state.eventDates.length ? state.eventDates : [defaultDate()];
 }
@@ -281,6 +282,22 @@ function clearPendingUploadTask() {
   localStorage.removeItem(uploadTaskStorageKey);
 }
 
+function pendingUploadNeedIdSet() {
+  const task = loadPendingUploadTask();
+  return new Set((task?.needs || []).map((need) => need.id).filter(Boolean));
+}
+
+function isPendingUploadNeed(need) {
+  if (!need?.id) return false;
+  return pendingUploadNeedIdSet().has(need.id);
+}
+
+function visibleNeeds() {
+  const pendingIds = pendingUploadNeedIdSet();
+  if (!pendingIds.size) return state.needs;
+  return state.needs.filter((need) => !pendingIds.has(need.id));
+}
+
 function setUploadProgress(text = "", type = "") {
   const progress = $("#uploadProgress");
   if (!progress) return;
@@ -379,6 +396,7 @@ async function uploadNeedTaskOnce(task) {
   setUploadProgress("正在生成统计");
   await refreshSharedStateAfterUpload();
   clearPendingUploadTask();
+  render();
   setUploadProgress(`完成 ${task.total} / ${task.total}`, "done");
   setTimeout(() => {
     if (!loadPendingUploadTask()) setUploadProgress("");
@@ -389,9 +407,9 @@ async function uploadNeedTaskOnce(task) {
 async function rollbackUploadTask(task) {
   const ids = (task.needs || []).map((need) => need.id).filter(Boolean);
   await ensureRemoteForUpload();
-  for (let index = 0; index < ids.length; index += 25) {
-    setUploadProgress(`正在取消 ${Math.min(index + 25, ids.length)} / ${ids.length}`);
-    await syncUploadPayload({ action: "deleteNeeds", needIds: ids.slice(index, index + 25), deferMirror: true });
+  for (let index = 0; index < ids.length; index += needRollbackChunkSize) {
+    setUploadProgress(`正在取消 ${Math.min(index + needRollbackChunkSize, ids.length)} / ${ids.length}`);
+    await syncUploadPayload({ action: "deleteNeeds", needIds: ids.slice(index, index + needRollbackChunkSize), deferMirror: true });
   }
   await refreshSharedStateAfterUpload();
   clearPendingUploadTask();
@@ -499,7 +517,7 @@ function normalizedNeedHotel(hotel) {
 }
 
 function needHotels() {
-  const names = new Set([...arrangementHotelOptions, ...state.needs.map((need) => normalizedNeedHotel(need.hotel)).filter(Boolean)]);
+  const names = new Set([...arrangementHotelOptions, ...visibleNeeds().map((need) => normalizedNeedHotel(need.hotel)).filter(Boolean)]);
   return Array.from(names);
 }
 
@@ -509,7 +527,7 @@ function personIdentity(person, fallback = "") {
 
 function roleIdentities() {
   const names = new Set(identityOptions);
-  state.needs.forEach((need) => {
+  visibleNeeds().forEach((need) => {
     peopleForNeed(need).forEach((person) => names.add(personIdentity(person, need.identity)));
   });
   return Array.from(names).filter(Boolean);
@@ -524,7 +542,7 @@ function needMatchesHotel(need, hotel = "all") {
 }
 
 function needStaysOnDate(date, hotel = "all", identity = "all") {
-  return state.needs.filter((need) => (
+  return visibleNeeds().filter((need) => (
     need.checkIn &&
     need.checkOut &&
     date >= need.checkIn &&
@@ -536,7 +554,7 @@ function needStaysOnDate(date, hotel = "all", identity = "all") {
 }
 
 function roleNeedsOnDate(date, identity = "all", hotel = "all") {
-  return state.needs.filter((need) => (
+  return visibleNeeds().filter((need) => (
     need.checkIn &&
     need.checkOut &&
     date >= need.checkIn &&
@@ -707,7 +725,7 @@ function currentFilteredNeeds() {
   const search = getSearch();
   const hotel = $("#needHotelFilter")?.value || "all";
   const identity = $("#needIdentityFilter")?.value || "all";
-  return state.needs.filter((need) => (
+  return visibleNeeds().filter((need) => (
     needSearchText(need).includes(search) &&
     needMatchesHotel(need, hotel) &&
     needMatchesIdentity(need, identity)
@@ -1601,12 +1619,13 @@ function setView(view) {
 }
 
 function kpiData() {
-  const totalNeeds = state.needs.length;
-  const nights = state.needs.reduce((sum, need) => sum + needNightCount(need), 0);
-  const people = state.needs.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
-  const withHotel = state.needs.filter((need) => need.hotel).length;
-  const missingHotel = state.needs.filter((need) => !need.hotel).length;
-  const missingRoomNo = state.needs.filter((need) => !need.roomNo).length;
+  const needs = visibleNeeds();
+  const totalNeeds = needs.length;
+  const nights = needs.reduce((sum, need) => sum + needNightCount(need), 0);
+  const people = needs.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
+  const withHotel = needs.filter((need) => need.hotel).length;
+  const missingHotel = needs.filter((need) => !need.hotel).length;
+  const missingRoomNo = needs.filter((need) => !need.roomNo).length;
   return [
     ["总住宿需求", totalNeeds, "一条需求可包含多人"],
     ["总人数", people, "主人员和增加人员合计"],
@@ -1630,7 +1649,7 @@ function renderKpis() {
 function renderHeatmap() {
   const dates = activeDates();
   const hotels = needHotels();
-  if (!state.needs.length) {
+  if (!visibleNeeds().length) {
     $("#heatmap").style.gridTemplateColumns = "1fr";
     $("#heatmap").innerHTML = `<div class="heat-cell header">暂无酒店住宿数据，请先维护入住需求。</div>`;
     return;
@@ -1670,7 +1689,7 @@ function renderTasks() {
 
 function renderUseBars() {
   const counts = {};
-  state.needs.forEach((need) => {
+  visibleNeeds().forEach((need) => {
     peopleForNeed(need).forEach((person) => {
       const identity = personIdentity(person, need.identity);
       counts[identity] = (counts[identity] || 0) + 1;
@@ -1733,7 +1752,7 @@ function renderCalendar() {
     $("#roomBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
     return;
   }
-  if (!hotels.length || !state.needs.length) {
+  if (!hotels.length || !visibleNeeds().length) {
     $("#roomBoard").innerHTML = `<div class="board-cell header">当前筛选条件下暂无入住需求。</div>`;
     return;
   }
@@ -1762,7 +1781,7 @@ function renderRoleStats() {
     $("#roleStatsBoard").innerHTML = `<div class="board-cell header">请选择开始日期和结束日期。</div>`;
     return;
   }
-  if (!identities.length || !state.needs.length) {
+  if (!identities.length || !visibleNeeds().length) {
     $("#roleStatsBoard").innerHTML = `<div class="board-cell header">当前筛选条件下暂无入住需求。</div>`;
     return;
   }
@@ -1782,7 +1801,7 @@ function renderRoleStats() {
 }
 
 function populateAssignmentForm() {
-  const pendingNeedRanges = state.needs
+  const pendingNeedRanges = visibleNeeds()
     .filter((need) => need.status !== "已取消")
     .flatMap((need) => unmetRangesForNeed(need).map((range, index) => ({ need, range, index })));
   $("#needSelect").innerHTML = pendingNeedRanges.length
