@@ -1061,7 +1061,8 @@ function statsExportHeaderRows(firstColumnLabel, dates, roomTypes) {
   return [
     [
       { value: firstColumnLabel, rowspan: 2, header: true },
-      ...dates.map((date) => ({ value: date, colspan: roomTypes.length, header: true }))
+      ...dates.map((date) => ({ value: date, colspan: roomTypes.length, header: true })),
+      { value: "总计", rowspan: 2, header: true }
     ],
     dates.flatMap((date, dateIndex) => roomTypes.map((type, typeIndex) => ({
       value: type,
@@ -1075,7 +1076,7 @@ function statsExportCells(needs, roomTypes) {
   const counts = needTypeCounts(needs);
   const total = roomTypes.reduce((sum, type) => sum + (counts[type] || 0), 0);
   if (!total) return roomTypes.map((_, index) => (index === 0 ? "暂无" : ""));
-  return roomTypes.map((type) => (counts[type] ? `${counts[type]}间` : ""));
+  return roomTypes.map((type) => (counts[type] ? String(counts[type]) : ""));
 }
 
 function buildStatsExportRows(firstColumnLabel, labels, dates, getNeeds) {
@@ -1084,10 +1085,26 @@ function buildStatsExportRows(firstColumnLabel, labels, dates, getNeeds) {
     byDate: dates.map((date) => getNeeds(label, date))
   }));
   const roomTypes = statsExportRoomTypes(data.flatMap((row) => row.byDate));
+  const columnTotals = dates.flatMap(() => roomTypes.map(() => 0));
   const rows = statsExportHeaderRows(firstColumnLabel, dates, roomTypes);
   data.forEach((row) => {
-    rows.push([row.label, ...row.byDate.flatMap((needs) => statsExportCells(needs, roomTypes))]);
+    let rowTotal = 0;
+    const cells = row.byDate.flatMap((needs, dateIndex) => {
+      const counts = needTypeCounts(needs);
+      roomTypes.forEach((type, typeIndex) => {
+        const count = counts[type] || 0;
+        columnTotals[dateIndex * roomTypes.length + typeIndex] += count;
+        rowTotal += count;
+      });
+      return statsExportCells(needs, roomTypes);
+    });
+    rows.push([row.label, ...cells, String(rowTotal)]);
   });
+  rows.push([
+    { value: "总计", header: true },
+    ...columnTotals.map((count) => String(count)),
+    String(columnTotals.reduce((sum, count) => sum + count, 0))
+  ]);
   return rows;
 }
 
