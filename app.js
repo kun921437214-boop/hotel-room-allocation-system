@@ -431,12 +431,15 @@ async function runNeedUploadTask(task) {
     } catch (error) {
       uploadInProgress = false;
       savePendingUploadTask(task);
-      setUploadProgress(`上传中断 ${task.nextIndex} / ${task.total}`, "bad");
+      const allUploaded = task.nextIndex >= task.total;
+      setUploadProgress(`${allUploaded ? "统计中断" : "上传中断"} ${task.nextIndex} / ${task.total}`, "bad");
       const action = await showUploadDialog({
-        title: "上传中断",
-        message: `本次上传已保存 ${task.nextIndex} / ${task.total} 条。可以继续从断点上传，或取消并撤回本次已保存内容。${error.message ? `原因：${error.message}` : ""}`,
+        title: allUploaded ? "统计生成中断" : "上传中断",
+        message: allUploaded
+          ? `本次 ${task.total} 条住宿需求已经保存完成，但最后生成统计和同步查看表时超时。可以重新生成统计，或取消并撤回本次上传内容。${error.message ? `原因：${error.message}` : ""}`
+          : `本次上传已保存 ${task.nextIndex} / ${task.total} 条。可以继续从断点上传，或取消并撤回本次已保存内容。${error.message ? `原因：${error.message}` : ""}`,
         meta: uploadTaskMeta(task),
-        primaryText: "继续上传",
+        primaryText: allUploaded ? "重新生成统计" : "继续上传",
         secondaryText: "取消上传"
       });
       if (action === "primary") continue;
@@ -464,12 +467,16 @@ async function runNeedUploadTask(task) {
 async function resumePendingUploadIfNeeded() {
   const task = loadPendingUploadTask();
   if (!task || uploadInProgress) return;
-  setUploadProgress(`未完成 ${task.nextIndex || 0} / ${task.total || task.needs.length}`, "bad");
+  const total = task.total || task.needs.length;
+  const allUploaded = (task.nextIndex || 0) >= total;
+  setUploadProgress(`${allUploaded ? "待生成统计" : "未完成"} ${task.nextIndex || 0} / ${total}`, "bad");
   const action = await showUploadDialog({
-    title: "发现未完成上传",
-    message: "上次批量上传还没有全部保存完成，可以从断点继续，也可以取消并撤回本次上传内容。",
+    title: allUploaded ? "发现待生成统计" : "发现未完成上传",
+    message: allUploaded
+      ? "上次批量上传的数据已经保存完成，但统计和查看表还没有生成完成。可以重新生成统计，也可以取消并撤回本次上传内容。"
+      : "上次批量上传还没有全部保存完成，可以从断点继续，也可以取消并撤回本次上传内容。",
     meta: uploadTaskMeta(task),
-    primaryText: "继续上传",
+    primaryText: allUploaded ? "重新生成统计" : "继续上传",
     secondaryText: "取消上传"
   });
   if (action === "primary") {

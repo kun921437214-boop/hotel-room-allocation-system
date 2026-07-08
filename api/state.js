@@ -286,6 +286,53 @@ function isDeletedRecord(record) {
   return String(record.fields?.["是否删除"] || "") === "是";
 }
 
+function recordTime(record) {
+  return Date.parse(record.fields?.["更新时间"] || record.fields?.["创建时间"] || "") || 0;
+}
+
+function activeUniqueRecords(records, keyField) {
+  const bestByKey = new Map();
+  for (const record of records.filter((item) => !isDeletedRecord(item))) {
+    const key = String(record.fields?.[keyField] || "");
+    if (!key) continue;
+    const existing = bestByKey.get(key);
+    if (!existing || recordTime(record) >= recordTime(existing)) bestByKey.set(key, record);
+  }
+  return Array.from(bestByKey.values());
+}
+
+async function deleteDuplicateActiveRecords(tableId, records, keyField) {
+  let deletedCount = 0;
+  const groups = new Map();
+  for (const record of records.filter((item) => !isDeletedRecord(item))) {
+    const key = String(record.fields?.[keyField] || "");
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(record);
+  }
+
+  for (const group of groups.values()) {
+    if (group.length <= 1) continue;
+    group.sort((a, b) => recordTime(b) - recordTime(a));
+    for (const duplicate of group.slice(1)) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${duplicate.record_id}`, {
+        fields: { ...duplicate.fields, "更新时间": nowIso(), "是否删除": "是" }
+      });
+      deletedCount += 1;
+    }
+  }
+  return deletedCount;
+}
+
+async function cleanupDuplicateCoreRecords(tableIds) {
+  const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
+  const needRecords = await listRecords(needTableId);
+  const personRecords = await listRecords(personTableId);
+  const deletedNeeds = await deleteDuplicateActiveRecords(needTableId, needRecords, "需求ID");
+  const deletedPeople = await deleteDuplicateActiveRecords(personTableId, personRecords, "人员ID");
+  return { deletedNeeds, deletedPeople };
+}
+
 function needCoreFields(need, existingFields = {}) {
   const updatedAt = nowIso();
   return {
@@ -441,10 +488,9 @@ async function recordOperation(type, needId, description, tableIds) {
 }
 
 function stateFromCoreRecords(needRecords, personRecords) {
-  const activeNeedRecords = needRecords.filter((record) => !isDeletedRecord(record));
+  const activeNeedRecords = activeUniqueRecords(needRecords, "需求ID");
   const peopleByNeed = new Map();
-  personRecords
-    .filter((record) => !isDeletedRecord(record))
+  activeUniqueRecords(personRecords, "人员ID")
     .sort((a, b) => Number(a.fields?.["顺序"] || 0) - Number(b.fields?.["顺序"] || 0))
     .forEach((record) => {
       const needId = String(record.fields?.["需求ID"] || "");
@@ -755,6 +801,7 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const tableIds = await ensureCoreTableIds();
     const deferMirror = body?.deferMirror === true;
+    let cleanupResult = null;
 
     if (body?.action === "upsertNeed") {
       await upsertNeedCore(body.need, tableIds);
@@ -773,7 +820,13 @@ module.exports = async function handler(req, res) {
       await deleteNeedsCore(needIds, tableIds);
       if (deferMirror) return json(res, 200, { ok: true, deletedCount: needIds.length, deferred: true });
       await recordOperation("批量删除需求", "", `网站批量删除 ${needIds.length} 条入住需求`, tableIds);
+    } else if (body?.action === "cleanupDuplicates") {
+      cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
+      const { state } = await readCoreState();
+      await refreshLegacySnapshot(state);
+      return json(res, 200, { ok: true, state, source: "core_tables", cleanup: cleanupResult });
     } else if (body?.action === "refreshViews") {
+      cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
       await recordOperation("刷新展示", "", "网站刷新住宿展示数据", tableIds);
     } else if (body?.state && typeof body.state === "object") {
       const needs = Array.isArray(body.state.needs) ? body.state.needs : [];
@@ -792,7 +845,7 @@ module.exports = async function handler(req, res) {
     } catch (error) {
       mirrorError = error.message || "飞书查看表同步失败";
     }
-    return json(res, 200, { ok: true, state, source: "core_tables", mirrorError });
+    return json(res, 200, { ok: true, state, source: "core_tables", mirrorError, cleanup: cleanupResult });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "同步失败" });
   }
