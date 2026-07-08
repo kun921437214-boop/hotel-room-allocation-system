@@ -677,6 +677,11 @@ table {
   min-width: 1120px;
 }
 
+#needsTable {
+  table-layout: fixed;
+  min-width: 1240px;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--line);
@@ -700,6 +705,80 @@ td .row-actions {
   gap: 6px;
 }
 
+#needsTable th,
+#needsTable td {
+  font-size: 12px;
+  line-height: 1.28;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+}
+
+#needsTable th:nth-child(1),
+#needsTable td:nth-child(1) {
+  width: 48px;
+}
+
+#needsTable th:nth-child(2),
+#needsTable td:nth-child(2) {
+  width: 96px;
+}
+
+#needsTable th:nth-child(3),
+#needsTable td:nth-child(3) {
+  width: 48px;
+}
+
+#needsTable th:nth-child(4),
+#needsTable td:nth-child(4) {
+  width: 108px;
+}
+
+#needsTable th:nth-child(5),
+#needsTable td:nth-child(5) {
+  width: 152px;
+}
+
+#needsTable th:nth-child(6),
+#needsTable td:nth-child(6) {
+  width: 88px;
+}
+
+#needsTable th:nth-child(7),
+#needsTable td:nth-child(7) {
+  width: 132px;
+}
+
+#needsTable th:nth-child(8),
+#needsTable td:nth-child(8) {
+  width: 68px;
+}
+
+#needsTable th:nth-child(9),
+#needsTable td:nth-child(9) {
+  width: 82px;
+}
+
+#needsTable th:nth-child(10),
+#needsTable td:nth-child(10) {
+  width: 70px;
+}
+
+#needsTable th:nth-child(11),
+#needsTable td:nth-child(11) {
+  width: 76px;
+}
+
+#needsTable th:nth-child(12),
+#needsTable td:nth-child(12) {
+  width: 140px;
+}
+
+#needsTable th:nth-child(13),
+#needsTable td:nth-child(13) {
+  width: 110px;
+}
+
 .compact-lines {
   line-height: 1.45;
   white-space: nowrap;
@@ -712,6 +791,12 @@ td .row-actions {
   gap: 5px;
   justify-content: center;
   min-height: 42px;
+}
+
+#needsTable .people-stack-cell,
+#needsTable .stay-time-cell {
+  gap: 2px;
+  min-height: 30px;
 }
 
 .people-stack-line,
@@ -730,6 +815,35 @@ td .row-actions {
   font-size: 11px;
   font-weight: 700;
   padding: 1px 5px;
+}
+
+#needsTable .people-stack-line,
+#needsTable .stay-time-cell div {
+  gap: 4px;
+  line-height: 1.25;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#needsTable .people-stack-line {
+  display: block;
+}
+
+#needsTable .stay-time-cell span {
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 0 4px;
+}
+
+#needsTable .stay-time-cell strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#needsTable .row-actions {
+  gap: 4px;
 }
 
 .people-stack-line,
