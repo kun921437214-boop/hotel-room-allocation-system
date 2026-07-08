@@ -741,7 +741,8 @@ td .row-actions {
   font-size: 11px;
   line-height: 1.22;
   overflow: hidden;
-  padding: 5px 5px;
+  padding: 5px 3px;
+  text-align: center;
   text-overflow: ellipsis;
   white-space: normal;
 }
@@ -827,6 +828,7 @@ td .row-actions {
 
 #needsTable .people-stack-cell,
 #needsTable .stay-time-cell {
+  align-items: center;
   gap: 1px;
   min-height: 28px;
 }
@@ -851,6 +853,7 @@ td .row-actions {
 
 #needsTable .people-stack-line,
 #needsTable .stay-time-cell div {
+  justify-content: center;
   gap: 3px;
   line-height: 1.25;
   min-width: 0;
@@ -860,6 +863,7 @@ td .row-actions {
 
 #needsTable .people-stack-line {
   display: block;
+  text-align: center;
 }
 
 #needsTable .stay-time-cell span {
@@ -875,15 +879,15 @@ td .row-actions {
 }
 
 #needsTable .row-actions {
-  align-items: stretch;
+  align-items: center;
   flex-direction: column;
   gap: 3px;
 }
 
 #needsTable .mini-btn {
   min-height: 24px;
-  padding: 3px 5px;
-  width: 100%;
+  padding: 3px 4px;
+  width: min(100%, 44px);
 }
 
 .people-stack-line,
