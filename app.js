@@ -479,6 +479,17 @@ function rangeDraftText(start, end) {
   return `已选范围：${formatDateForDisplay(start)} 至 ${formatDateForDisplay(end)}`;
 }
 
+function validateOptionalStayDates(checkIn, checkOut, prefix = "") {
+  const label = prefix ? `${prefix} ` : "";
+  if (!checkIn && !checkOut) return;
+  if (!checkIn || !checkOut) {
+    throw new Error(`${label}入住日期和离店日期需要同时填写，或同时留空`);
+  }
+  if (checkIn >= checkOut) {
+    throw new Error(`${label}离店日期必须晚于入住日期`);
+  }
+}
+
 function renderRangeCalendar(picker) {
   const grid = picker.querySelector("[data-range-calendar]");
   const title = picker.querySelector("[data-range-month-title]");
@@ -1128,12 +1139,7 @@ function remarksFromBatchRecords(records) {
 
 function needFromGroupedBatchRecords(records, sequence) {
   const common = assertGroupedNeedConsistency(records, sequence);
-  if (!common.checkIn || !common.checkOut) {
-    throw new Error(`序号 ${sequence} 缺少入住日期或离店日期`);
-  }
-  if (common.checkIn >= common.checkOut) {
-    throw new Error(`序号 ${sequence} 离店日期必须晚于入住日期`);
-  }
+  validateOptionalStayDates(common.checkIn, common.checkOut, `序号 ${sequence}`);
   const people = records.map((record) => personFromBatchRecord(record)).filter((person) => person.name || person.phone || person.idNo);
   if (!people.length || !people[0].name) {
     throw new Error(`序号 ${sequence} 缺少姓名`);
@@ -1210,12 +1216,10 @@ function needFromBatchRecord(record, index) {
   const name = recordValue(record, ["姓名", "姓名/团队名称"]).trim();
   const checkIn = normalizeDateValue(record["入住日期"]);
   const checkOut = normalizeDateValue(record["离店日期"]);
-  if (!name || !checkIn || !checkOut) {
-    throw new Error(`第 ${index + 2} 行缺少姓名、入住日期或离店日期`);
+  if (!name) {
+    throw new Error(`第 ${index + 2} 行缺少姓名`);
   }
-  if (checkIn >= checkOut) {
-    throw new Error(`第 ${index + 2} 行离店日期必须晚于入住日期`);
-  }
+  validateOptionalStayDates(checkIn, checkOut, `第 ${index + 2} 行`);
   const identity = normalizeIdentityValue(recordValue(record, ["人员性质", "身份类型"]));
   const companions = companionsFromBatchRecord(record, identity);
   const hotel = normalizeArrangementHotel(recordValue(record, ["安排酒店", "酒店"]));
@@ -1851,7 +1855,10 @@ function openDialog(title, fields, initial, onSave) {
               </div>
               <div class="date-range-footer">
                 <span data-range-draft>请选择开始日期和结束日期</span>
-                <button class="primary-btn" type="button" data-range-apply>确认</button>
+                <div class="date-range-footer-actions">
+                  ${field.allowEmpty ? `<button class="ghost-btn range-clear-btn" type="button" data-range-clear>清空</button>` : ""}
+                  <button class="primary-btn" type="button" data-range-apply>确认</button>
+                </div>
               </div>
             </div>
           </div>
@@ -1947,7 +1954,7 @@ function needFields() {
     { key: "hotel", label: "安排酒店", type: "select", options: ["", ...arrangementHotelOptions] },
     { key: "roomNo", label: "房间号" },
     { key: "roomType", label: "房间类型", type: "select", options: roomTypeOptions },
-    { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut" },
+    { label: "日期", type: "dateRange", startKey: "checkIn", endKey: "checkOut", allowEmpty: true },
     { key: "note", label: "备注", type: "textarea" }
   ];
 }
@@ -2036,11 +2043,10 @@ function bindEvents() {
       id: nextId("REQ-", state.needs),
       people: 1,
       gender: "男",
-      checkIn: activeDates()[0],
-      checkOut: activeDates()[1] || defaultDate(1),
       identity: "工作人员",
       roomType: "双标"
     }, (values) => {
+      validateOptionalStayDates(values.checkIn, values.checkOut, "入住需求");
       const need = { id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) };
       state.needs.push(need);
       addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
@@ -2092,6 +2098,7 @@ function bindEvents() {
   document.body.addEventListener("click", (event) => {
     const rangeTrigger = event.target.closest("[data-range-trigger]");
     const rangeApply = event.target.closest("[data-range-apply]");
+    const rangeClear = event.target.closest("[data-range-clear]");
     const rangeMonthNav = event.target.closest("[data-range-month-nav]");
     const rangeDay = event.target.closest("[data-range-day]");
     const addCompanionBtn = event.target.closest("[data-add-companion]");
@@ -2149,6 +2156,14 @@ function bindEvents() {
       if (picker.matches("[data-role-range]")) renderRoleStats();
       return;
     }
+    if (rangeClear) {
+      event.preventDefault();
+      const picker = rangeClear.closest("[data-date-range]");
+      picker.querySelector("[data-range-start]").value = "";
+      picker.querySelector("[data-range-end]").value = "";
+      renderRangeCalendar(picker);
+      return;
+    }
     if (addCompanionBtn) {
       event.preventDefault();
       addCompanionBtn.closest("[data-companion-editor]").querySelector("[data-companion-list]").insertAdjacentHTML("beforeend", companionCard());
@@ -2188,6 +2203,7 @@ function bindEvents() {
     if (needBtn) {
       const need = needById(needBtn.dataset.editNeed);
       openDialog("编辑入住需求", needFields(), need, (values) => {
+        validateOptionalStayDates(values.checkIn, values.checkOut, "入住需求");
         Object.assign(need, normalizeNeedValues(values));
         addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
         return { type: "need", need };
@@ -2216,7 +2232,13 @@ function bindEvents() {
   $("#dialogForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (!editing) return;
-    const result = editing.onSave(dialogValues());
+    let result;
+    try {
+      result = editing.onSave(dialogValues());
+    } catch (error) {
+      alert(error.message);
+      return;
+    }
     if (result?.type === "need") {
       saveNeedState(result.need);
     } else {

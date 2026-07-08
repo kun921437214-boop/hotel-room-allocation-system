@@ -1077,6 +1077,18 @@ dialog::backdrop {
   padding: 5px 8px;
 }
 
+.date-range-footer-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.date-range-footer .range-clear-btn {
+  min-height: 30px;
+  min-width: 58px;
+  padding: 5px 8px;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
