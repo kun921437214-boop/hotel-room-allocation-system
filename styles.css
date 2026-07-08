@@ -240,6 +240,32 @@ button {
   color: var(--red);
 }
 
+.upload-progress {
+  align-items: center;
+  background: var(--blue-soft);
+  border: 1px solid #c7d7ff;
+  border-radius: 999px;
+  color: var(--blue);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  min-height: 30px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+.upload-progress.bad {
+  background: var(--red-soft);
+  border-color: #ffc0c0;
+  color: var(--red);
+}
+
+.upload-progress.done {
+  background: var(--green-soft);
+  border-color: #bce5d3;
+  color: var(--green);
+}
+
 .file-btn input {
   display: none;
 }
@@ -920,6 +946,47 @@ dialog {
 
 dialog::backdrop {
   background: rgba(12, 18, 28, 0.45);
+}
+
+#uploadDialog {
+  border-radius: 10px;
+  width: min(460px, calc(100vw - 40px));
+}
+
+.upload-dialog-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.upload-dialog-card h3 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.upload-dialog-card p {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.upload-dialog-meta {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+  padding: 12px;
+}
+
+.upload-dialog-meta:empty {
+  display: none;
 }
 
 .dialog-card {

@@ -1,5 +1,7 @@
 const storageKey = "hotelRoomOpsLocalSystem.v5.roomAvailability";
 const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
+const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
+const needUploadChunkSize = 10;
 
 const sampleData = {
   hotels: [
@@ -26,6 +28,7 @@ let remoteOperationChain = Promise.resolve();
 let remoteOperationPending = 0;
 let localStateRevision = 0;
 let needsRemoteSaveAfterLoad = false;
+let uploadInProgress = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -220,6 +223,257 @@ function deleteNeedState(needId) {
   markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({ action: "deleteNeed", needId });
+}
+
+function randomToken(length = 8) {
+  if (window.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(length);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => (byte % 36).toString(36)).join("");
+  }
+  return Math.random().toString(36).slice(2, 2 + length).padEnd(length, "0");
+}
+
+function uploadTaskId() {
+  return `UPLOAD-${dateToValue(new Date()).replaceAll("-", "")}-${Date.now().toString(36)}-${randomToken(5)}`;
+}
+
+function uploadNeedId(taskId, index) {
+  return `REQ-${taskId.replace("UPLOAD-", "")}-${String(index + 1).padStart(3, "0")}-${randomToken(4)}`;
+}
+
+function peopleCountForNeeds(needs) {
+  return needs.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
+}
+
+function createNeedUploadTask(needs) {
+  const id = uploadTaskId();
+  return {
+    id,
+    createdAt: new Date().toISOString(),
+    nextIndex: 0,
+    total: needs.length,
+    peopleTotal: peopleCountForNeeds(needs),
+    needs: needs.map((need, index) => ({
+      ...need,
+      id: uploadNeedId(id, index),
+      companions: Array.isArray(need.companions) ? need.companions : []
+    }))
+  };
+}
+
+function savePendingUploadTask(task) {
+  localStorage.setItem(uploadTaskStorageKey, JSON.stringify(task));
+}
+
+function loadPendingUploadTask() {
+  const stored = localStorage.getItem(uploadTaskStorageKey);
+  if (!stored) return null;
+  try {
+    const task = JSON.parse(stored);
+    return task?.needs?.length ? task : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingUploadTask() {
+  localStorage.removeItem(uploadTaskStorageKey);
+}
+
+function setUploadProgress(text = "", type = "") {
+  const progress = $("#uploadProgress");
+  if (!progress) return;
+  progress.hidden = !text;
+  progress.textContent = text;
+  progress.className = ["upload-progress", type].filter(Boolean).join(" ");
+}
+
+function uploadTaskMeta(task) {
+  const saved = Math.min(task.nextIndex || 0, task.total || task.needs?.length || 0);
+  const remaining = Math.max(0, (task.total || task.needs?.length || 0) - saved);
+  return [
+    `<span>总需求：${task.total || task.needs?.length || 0} 条</span>`,
+    `<span>总人数：${task.peopleTotal || peopleCountForNeeds(task.needs || [])} 人</span>`,
+    `<span>已保存：${saved} 条</span>`,
+    `<span>剩余：${remaining} 条</span>`
+  ].join("");
+}
+
+function showUploadDialog({ title, message, meta = "", primaryText = "继续上传", secondaryText = "取消上传", hideSecondary = false }) {
+  return new Promise((resolve) => {
+    const dialog = $("#uploadDialog");
+    const primary = $("#uploadPrimaryBtn");
+    const secondary = $("#uploadSecondaryBtn");
+    $("#uploadDialogTitle").textContent = title;
+    $("#uploadDialogMessage").textContent = message;
+    $("#uploadDialogMeta").innerHTML = meta;
+    primary.textContent = primaryText;
+    secondary.textContent = secondaryText;
+    secondary.hidden = hideSecondary;
+
+    const cleanup = (value) => {
+      primary.removeEventListener("click", onPrimary);
+      secondary.removeEventListener("click", onSecondary);
+      dialog.removeEventListener("cancel", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onPrimary = () => cleanup("primary");
+    const onSecondary = () => cleanup("secondary");
+    const onCancel = (event) => {
+      event.preventDefault();
+      if (!hideSecondary) cleanup("secondary");
+    };
+    primary.addEventListener("click", onPrimary);
+    secondary.addEventListener("click", onSecondary);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+  });
+}
+
+async function syncUploadPayload(payload) {
+  const response = await fetch(syncApiUrl, {
+    method: "PUT",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(payload)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.ok === false) {
+    throw new Error(result?.error || `HTTP ${response.status}`);
+  }
+  return result;
+}
+
+async function ensureRemoteForUpload() {
+  if (remoteSyncReady) return;
+  const loaded = await loadRemoteState();
+  if (!loaded) throw new Error("共享数据未连接，请稍后再试。");
+}
+
+async function refreshSharedStateAfterUpload() {
+  const result = await syncUploadPayload({ action: "refreshViews" });
+  if (result?.state) {
+    state = result.state;
+    saveLocalStateOnly();
+    render();
+  }
+  remoteSyncReady = true;
+  setSyncStatus("共享数据已保存", "ok");
+}
+
+async function uploadNeedTaskOnce(task) {
+  await ensureRemoteForUpload();
+  uploadInProgress = true;
+  savePendingUploadTask(task);
+  while (task.nextIndex < task.needs.length) {
+    const start = task.nextIndex;
+    const chunk = task.needs.slice(start, start + needUploadChunkSize);
+    setUploadProgress(`上传 ${start} / ${task.total}`);
+    setSyncStatus("正在保存共享数据");
+    await syncUploadPayload({ action: "upsertNeeds", needs: chunk, deferMirror: true });
+    task.nextIndex = start + chunk.length;
+    savePendingUploadTask(task);
+    setUploadProgress(`上传 ${task.nextIndex} / ${task.total}`);
+  }
+  setUploadProgress("正在生成统计");
+  await refreshSharedStateAfterUpload();
+  clearPendingUploadTask();
+  setUploadProgress(`完成 ${task.total} / ${task.total}`, "done");
+  setTimeout(() => {
+    if (!loadPendingUploadTask()) setUploadProgress("");
+  }, 2500);
+  uploadInProgress = false;
+}
+
+async function rollbackUploadTask(task) {
+  const ids = (task.needs || []).map((need) => need.id).filter(Boolean);
+  await ensureRemoteForUpload();
+  for (let index = 0; index < ids.length; index += 25) {
+    setUploadProgress(`正在取消 ${Math.min(index + 25, ids.length)} / ${ids.length}`);
+    await syncUploadPayload({ action: "deleteNeeds", needIds: ids.slice(index, index + 25), deferMirror: true });
+  }
+  await refreshSharedStateAfterUpload();
+  clearPendingUploadTask();
+  setUploadProgress("");
+}
+
+async function runNeedUploadTask(task) {
+  while (task) {
+    try {
+      await uploadNeedTaskOnce(task);
+      await showUploadDialog({
+        title: "上传完成",
+        message: `已全部保存完成，共 ${task.total} 条住宿需求，${task.peopleTotal} 人。`,
+        meta: uploadTaskMeta({ ...task, nextIndex: task.total }),
+        primaryText: "知道了",
+        hideSecondary: true
+      });
+      return;
+    } catch (error) {
+      uploadInProgress = false;
+      savePendingUploadTask(task);
+      setUploadProgress(`上传中断 ${task.nextIndex} / ${task.total}`, "bad");
+      const action = await showUploadDialog({
+        title: "上传中断",
+        message: `本次上传已保存 ${task.nextIndex} / ${task.total} 条。可以继续从断点上传，或取消并撤回本次已保存内容。${error.message ? `原因：${error.message}` : ""}`,
+        meta: uploadTaskMeta(task),
+        primaryText: "继续上传",
+        secondaryText: "取消上传"
+      });
+      if (action === "primary") continue;
+      try {
+        await rollbackUploadTask(task);
+        await showUploadDialog({
+          title: "已取消上传",
+          message: "本次上传已取消，系统已尝试撤回本次已保存的内容。",
+          primaryText: "知道了",
+          hideSecondary: true
+        });
+      } catch (rollbackError) {
+        await showUploadDialog({
+          title: "取消上传失败",
+          message: `系统没有完全撤回本次上传内容，请稍后刷新检查。原因：${rollbackError.message || "未知错误"}`,
+          primaryText: "知道了",
+          hideSecondary: true
+        });
+      }
+      return;
+    }
+  }
+}
+
+async function resumePendingUploadIfNeeded() {
+  const task = loadPendingUploadTask();
+  if (!task || uploadInProgress) return;
+  setUploadProgress(`未完成 ${task.nextIndex || 0} / ${task.total || task.needs.length}`, "bad");
+  const action = await showUploadDialog({
+    title: "发现未完成上传",
+    message: "上次批量上传还没有全部保存完成，可以从断点继续，也可以取消并撤回本次上传内容。",
+    meta: uploadTaskMeta(task),
+    primaryText: "继续上传",
+    secondaryText: "取消上传"
+  });
+  if (action === "primary") {
+    await runNeedUploadTask(task);
+    return;
+  }
+  try {
+    await rollbackUploadTask(task);
+    await showUploadDialog({
+      title: "已取消上传",
+      message: "未完成上传已取消，系统已尝试撤回本次已保存的内容。",
+      primaryText: "知道了",
+      hideSecondary: true
+    });
+  } catch (error) {
+    await showUploadDialog({
+      title: "取消上传失败",
+      message: `系统没有完全撤回本次上传内容，请稍后刷新检查。原因：${error.message || "未知错误"}`,
+      primaryText: "知道了",
+      hideSecondary: true
+    });
+  }
 }
 
 function nextId(prefix, list) {
@@ -1306,6 +1560,10 @@ async function importRoomBatch(file) {
 }
 
 async function importNeedBatch(file) {
+  if (uploadInProgress) {
+    alert("当前已有上传任务正在进行，请等待完成后再上传。");
+    return;
+  }
   const records = await parseBatchRecordsFromFile(file);
   if (!records.length) {
     alert("没有识别到可导入的入住需求，请使用下载模板填写后再上传。");
@@ -1318,16 +1576,9 @@ async function importNeedBatch(file) {
     alert(error.message);
     return;
   }
-  const addedNeeds = [];
-  needs.forEach((need) => {
-    const item = { id: nextId("REQ-", state.needs), ...need };
-    state.needs.push(item);
-    addedNeeds.push(item);
-    addDatesToEventRange(nightsBetween(item.checkIn, item.checkOut));
-  });
-  saveNeedsState(addedNeeds);
-  render();
-  alert(`已批量新增 ${needs.length} 条入住需求。`);
+  const task = createNeedUploadTask(needs);
+  savePendingUploadTask(task);
+  await runNeedUploadTask(task);
 }
 
 function setView(view) {
@@ -2310,6 +2561,7 @@ async function initializeApp() {
   render();
   const loaded = await loadRemoteState();
   if (loaded) render();
+  await resumePendingUploadIfNeeded();
 }
 
 initializeApp();

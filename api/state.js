@@ -400,6 +400,31 @@ async function deleteNeedCore(needId, tableIds) {
   }
 }
 
+async function deleteNeedsCore(needIds, tableIds) {
+  const ids = new Set((needIds || []).map((id) => String(id || "")).filter(Boolean));
+  if (!ids.size) return;
+  const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
+  const needRecords = await listRecords(needTableId);
+  for (const record of needRecords) {
+    const needId = String(record.fields?.["需求ID"] || "");
+    if (ids.has(needId) && !isDeletedRecord(record)) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records/${record.record_id}`, {
+        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+      });
+    }
+  }
+
+  const personRecords = await listRecords(personTableId);
+  for (const record of personRecords) {
+    const needId = String(record.fields?.["需求ID"] || "");
+    if (ids.has(needId) && !isDeletedRecord(record)) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
+        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+      });
+    }
+  }
+}
+
 async function recordOperation(type, needId, description, tableIds) {
   const { operationTableId } = tableIds || await ensureCoreTableIds();
   const id = `OP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -729,18 +754,27 @@ module.exports = async function handler(req, res) {
 
     const body = await readJsonBody(req);
     const tableIds = await ensureCoreTableIds();
+    const deferMirror = body?.deferMirror === true;
 
     if (body?.action === "upsertNeed") {
       await upsertNeedCore(body.need, tableIds);
-      await recordOperation("保存需求", body.need?.id || "", "网站保存单条入住需求", tableIds);
+      if (!deferMirror) await recordOperation("保存需求", body.need?.id || "", "网站保存单条入住需求", tableIds);
     } else if (body?.action === "upsertNeeds") {
       const needs = Array.isArray(body.needs) ? body.needs : [];
       const context = await readCoreWriteContext(tableIds);
       for (const need of needs) await upsertNeedCore(need, tableIds, context);
+      if (deferMirror) return json(res, 200, { ok: true, savedCount: needs.length, deferred: true });
       await recordOperation("批量保存需求", "", `网站批量保存 ${needs.length} 条入住需求`, tableIds);
     } else if (body?.action === "deleteNeed") {
       await deleteNeedCore(body.needId, tableIds);
-      await recordOperation("删除需求", body.needId || "", "网站删除入住需求", tableIds);
+      if (!deferMirror) await recordOperation("删除需求", body.needId || "", "网站删除入住需求", tableIds);
+    } else if (body?.action === "deleteNeeds") {
+      const needIds = Array.isArray(body.needIds) ? body.needIds : [];
+      await deleteNeedsCore(needIds, tableIds);
+      if (deferMirror) return json(res, 200, { ok: true, deletedCount: needIds.length, deferred: true });
+      await recordOperation("批量删除需求", "", `网站批量删除 ${needIds.length} 条入住需求`, tableIds);
+    } else if (body?.action === "refreshViews") {
+      await recordOperation("刷新展示", "", "网站刷新住宿展示数据", tableIds);
     } else if (body?.state && typeof body.state === "object") {
       const needs = Array.isArray(body.state.needs) ? body.state.needs : [];
       const context = await readCoreWriteContext(tableIds);
