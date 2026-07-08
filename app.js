@@ -1,8 +1,6 @@
 const storageKey = "hotelRoomOpsLocalSystem.v5.roomAvailability";
 const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
 const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
-const needUploadChunkSize = 1;
-const needRollbackChunkSize = 5;
 
 const sampleData = {
   hotels: [
@@ -300,7 +298,6 @@ function visibleNeeds() {
 
 function pendingTaskIsAlreadyInSharedState(task) {
   const total = task.total || task.needs?.length || 0;
-  if ((task.nextIndex || 0) < total) return false;
   const savedIds = new Set((state.needs || []).map((need) => need.id).filter(Boolean));
   const taskIds = (task.needs || []).map((need) => need.id).filter(Boolean);
   return taskIds.length === total && taskIds.every((id) => savedIds.has(id));
@@ -391,16 +388,12 @@ async function uploadNeedTaskOnce(task) {
   await ensureRemoteForUpload();
   uploadInProgress = true;
   savePendingUploadTask(task);
-  while (task.nextIndex < task.needs.length) {
-    const start = task.nextIndex;
-    const chunk = task.needs.slice(start, start + needUploadChunkSize);
-    setUploadProgress(`上传 ${start} / ${task.total}`);
-    setSyncStatus("正在保存共享数据");
-    await syncUploadPayload({ action: "upsertNeeds", needs: chunk, deferMirror: true });
-    task.nextIndex = start + chunk.length;
-    savePendingUploadTask(task);
-    setUploadProgress(`上传 ${task.nextIndex} / ${task.total}`);
-  }
+  setUploadProgress(`上传 0 / ${task.total}`);
+  setSyncStatus("正在批量保存共享数据");
+  await syncUploadPayload({ action: "upsertNeeds", needs: task.needs });
+  task.nextIndex = task.total;
+  savePendingUploadTask(task);
+  setUploadProgress(`上传 ${task.nextIndex} / ${task.total}`);
   setUploadProgress("正在确认数据");
   await refreshSharedStateAfterUpload();
   clearPendingUploadTask();
@@ -415,10 +408,8 @@ async function uploadNeedTaskOnce(task) {
 async function rollbackUploadTask(task) {
   const ids = (task.needs || []).map((need) => need.id).filter(Boolean);
   await ensureRemoteForUpload();
-  for (let index = 0; index < ids.length; index += needRollbackChunkSize) {
-    setUploadProgress(`正在取消 ${Math.min(index + needRollbackChunkSize, ids.length)} / ${ids.length}`);
-    await syncUploadPayload({ action: "deleteNeeds", needIds: ids.slice(index, index + needRollbackChunkSize), deferMirror: true });
-  }
+  setUploadProgress(`正在取消 ${ids.length} / ${ids.length}`);
+  await syncUploadPayload({ action: "deleteNeeds", needIds: ids, deferMirror: true });
   await refreshSharedStateAfterUpload();
   clearPendingUploadTask();
   setUploadProgress("");
