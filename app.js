@@ -1814,21 +1814,38 @@ function renderHeatmap() {
 }
 
 function renderTasks() {
-  const tasks = [];
+  const taskGroups = {
+    hotel: new Set(),
+    date: new Set(),
+    info: new Set(),
+    roomNo: new Set()
+  };
+  const addNeedNames = (group, need) => {
+    peopleForNeed(need).forEach((person) => group.add(person.name || "未填写姓名"));
+  };
   currentFilteredNeeds().forEach((need) => {
-    const name = peopleForNeed(need).map((person) => person.name).filter(Boolean).join("、") || "未填写姓名";
-    if (!need.hotel) {
-      tasks.push(["待补酒店", name, `${need.checkIn || "未填入住"} 至 ${need.checkOut || "未填离店"}`, "status-red"]);
-    } else if (!need.roomNo) {
-      tasks.push(["待补房间号", name, `${need.hotel}｜${need.roomType || "未填房型"}`, "status-yellow"]);
-    }
+    if (!need.hotel) addNeedNames(taskGroups.hotel, need);
+    if (!need.checkIn || !need.checkOut) addNeedNames(taskGroups.date, need);
+    if (!need.roomNo) addNeedNames(taskGroups.roomNo, need);
+    peopleForNeed(need).forEach((person, index) => {
+      const identity = index === 0 ? need.identity : person.identity;
+      if (!person.phone || !person.idNo || !person.gender || !identity) {
+        taskGroups.info.add(person.name || "未填写姓名");
+      }
+    });
   });
-  $("#taskList").innerHTML = tasks.length ? tasks.slice(0, 8).map(([type, name, desc, cls]) => `
+  const tasks = [
+    ["待补充酒店", taskGroups.hotel, "status-red"],
+    ["待补充日期", taskGroups.date, "status-red"],
+    ["待补充信息", taskGroups.info, "status-red"],
+    ["待补充房间号", taskGroups.roomNo, "status-yellow"]
+  ].filter(([, names]) => names.size);
+  $("#taskList").innerHTML = tasks.length ? tasks.map(([type, names, cls]) => `
     <div class="task ${cls}">
-      <strong>${type}：${name}</strong>
-      <span>${desc}</span>
+      <strong>${type}：${Array.from(names).join("、")}</strong>
+      <span>共 ${names.size} 人需要处理</span>
     </div>
-  `).join("") : `<div class="task status-green"><strong>暂无待补信息</strong><span>当前入住需求的酒店和房间号都已填写。</span></div>`;
+  `).join("") : `<div class="task status-green"><strong>暂无待补信息</strong><span>当前入住需求的酒店、日期、基础信息和房间号都已填写。</span></div>`;
 }
 
 function renderUseBars() {
