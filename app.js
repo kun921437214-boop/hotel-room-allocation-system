@@ -368,10 +368,6 @@ async function ensureRemoteForUpload() {
   if (!loaded) throw new Error("共享数据未连接，请稍后再试。");
 }
 
-function refreshReadableViewsInBackground() {
-  syncUploadPayload({ action: "refreshViews" }).catch(() => {});
-}
-
 async function refreshSharedStateAfterUpload() {
   const result = await syncUploadPayload({ action: "cleanupDuplicates" });
   if (result?.state) {
@@ -381,7 +377,6 @@ async function refreshSharedStateAfterUpload() {
   }
   remoteSyncReady = true;
   setSyncStatus("共享数据已保存", "ok");
-  refreshReadableViewsInBackground();
 }
 
 async function uploadNeedTaskOnce(task) {
@@ -437,14 +432,14 @@ async function runNeedUploadTask(task) {
       uploadInProgress = false;
       savePendingUploadTask(task);
       const allUploaded = task.nextIndex >= task.total;
-      setUploadProgress(`${allUploaded ? "统计中断" : "上传中断"} ${task.nextIndex} / ${task.total}`, "bad");
+      setUploadProgress(`${allUploaded ? "确认中断" : "上传中断"} ${task.nextIndex} / ${task.total}`, "bad");
       const action = await showUploadDialog({
-        title: allUploaded ? "统计生成中断" : "上传中断",
+        title: allUploaded ? "数据确认中断" : "上传中断",
         message: allUploaded
-          ? `本次 ${task.total} 条住宿需求已经保存完成，但最后生成统计和同步查看表时超时。可以重新生成统计，或取消并撤回本次上传内容。${error.message ? `原因：${error.message}` : ""}`
+          ? `本次 ${task.total} 条住宿需求已经保存完成，但最后确认共享数据时中断。可以重新确认，或取消并撤回本次上传内容。${error.message ? `原因：${error.message}` : ""}`
           : `本次上传已保存 ${task.nextIndex} / ${task.total} 条。可以继续从断点上传，或取消并撤回本次已保存内容。${error.message ? `原因：${error.message}` : ""}`,
         meta: uploadTaskMeta(task),
-        primaryText: allUploaded ? "重新生成统计" : "继续上传",
+        primaryText: allUploaded ? "重新确认数据" : "继续上传",
         secondaryText: "取消上传"
       });
       if (action === "primary") continue;
@@ -474,14 +469,14 @@ async function resumePendingUploadIfNeeded() {
   if (!task || uploadInProgress) return;
   const total = task.total || task.needs.length;
   const allUploaded = (task.nextIndex || 0) >= total;
-  setUploadProgress(`${allUploaded ? "待生成统计" : "未完成"} ${task.nextIndex || 0} / ${total}`, "bad");
+  setUploadProgress(`${allUploaded ? "待确认" : "未完成"} ${task.nextIndex || 0} / ${total}`, "bad");
   const action = await showUploadDialog({
-    title: allUploaded ? "发现待生成统计" : "发现未完成上传",
+    title: allUploaded ? "发现待确认数据" : "发现未完成上传",
     message: allUploaded
-      ? "上次批量上传的数据已经保存完成，但统计和查看表还没有生成完成。可以重新生成统计，也可以取消并撤回本次上传内容。"
+      ? "上次批量上传的数据已经保存完成，但最后确认共享数据时中断。可以重新确认，也可以取消并撤回本次上传内容。"
       : "上次批量上传还没有全部保存完成，可以从断点继续，也可以取消并撤回本次上传内容。",
     meta: uploadTaskMeta(task),
-    primaryText: allUploaded ? "重新生成统计" : "继续上传",
+    primaryText: allUploaded ? "重新确认数据" : "继续上传",
     secondaryText: "取消上传"
   });
   if (action === "primary") {

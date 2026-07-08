@@ -818,6 +818,7 @@ module.exports = async function handler(req, res) {
     const body = await readJsonBody(req);
     const tableIds = await ensureCoreTableIds();
     const deferMirror = body?.deferMirror === true;
+    const shouldSyncReadableViews = body?.action === "refreshViews";
     let cleanupResult = null;
 
     if (body?.action === "upsertNeed") {
@@ -857,10 +858,12 @@ module.exports = async function handler(req, res) {
     const { state } = await readCoreState();
     await refreshLegacySnapshot(state);
     let mirrorError = "";
-    try {
-      await syncReadableMirrorTables(state);
-    } catch (error) {
-      mirrorError = error.message || "飞书查看表同步失败";
+    if (shouldSyncReadableViews) {
+      try {
+        await syncReadableMirrorTables(state);
+      } catch (error) {
+        mirrorError = error.message || "飞书查看表同步失败";
+      }
     }
     return json(res, 200, { ok: true, state, source: "core_tables", mirrorError, cleanup: cleanupResult });
   } catch (error) {
