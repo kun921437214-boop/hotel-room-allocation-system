@@ -674,9 +674,11 @@ function needTypeCounts(needs) {
 }
 
 function normalizedRoomType(type) {
-  if (type === "双床房" || type === "双标间") return "双标";
-  if (type === "大床房") return "大床";
-  return type || "未填";
+  const text = String(type || "").trim().replace(/\s+/g, "");
+  if (["双床房", "双标间", "标间", "双标"].includes(text)) return "双标";
+  if (["大床房", "大床间", "大床"].includes(text)) return "大床";
+  if (["套间", "套房"].includes(text)) return "套房";
+  return text || "未填";
 }
 
 function typeCountText(needs) {
@@ -1388,6 +1390,8 @@ function exportRoomBalance() {
 }
 
 function parseCsv(text) {
+  const firstDataLine = String(text || "").split(/\r?\n/).find((line) => line.trim()) || "";
+  const delimiter = (firstDataLine.match(/\t/g) || []).length > (firstDataLine.match(/,/g) || []).length ? "\t" : ",";
   const rows = [];
   let row = [];
   let cell = "";
@@ -1406,7 +1410,7 @@ function parseCsv(text) {
       }
     } else if (char === '"') {
       quoted = true;
-    } else if (char === ",") {
+    } else if (char === delimiter) {
       row.push(cell.trim());
       cell = "";
     } else if (char === "\n") {
@@ -1430,21 +1434,73 @@ function parseHtmlTable(text) {
   )).filter((row) => row.some(Boolean));
 }
 
-function rowsToBatchRecords(rows) {
-  if (rows.length < 2) return [];
-  const headers = rows[0].map((item) => item.trim());
-  return rows.slice(1).map((row) => {
+const batchHeaderAliases = new Map([
+  ["需求序号", "序号"],
+  ["房间序号", "序号"],
+  ["入住人姓名", "姓名"],
+  ["姓名/团队名称", "姓名"],
+  ["入住人/团队", "姓名"],
+  ["联系方式", "电话"],
+  ["手机号", "电话"],
+  ["手机", "电话"],
+  ["联系电话", "电话"],
+  ["身份证号码", "身份证号"],
+  ["身份证", "身份证号"],
+  ["证件号码", "身份证号"],
+  ["身份类型", "人员性质"],
+  ["性质", "人员性质"],
+  ["期望房型", "房间类型"],
+  ["房型", "房间类型"],
+  ["已分配房间", "房间号"],
+  ["退房日期", "离店日期"],
+  ["特殊备注", "备注"]
+]);
+
+function normalizeBatchHeader(value, kind = "need") {
+  const header = String(value || "").replace(/^\uFEFF/, "").replace(/[\s\n\r]+/g, "").trim();
+  if (kind === "room" && ["安排酒店", "酒店名称"].includes(header)) return "酒店";
+  if (kind === "room" && ["房型", "房间类型", "期望房型"].includes(header)) return "房型";
+  if (kind === "need" && ["酒店", "酒店名称"].includes(header)) return "安排酒店";
+  return batchHeaderAliases.get(header) || header;
+}
+
+function batchImportSchema(kind) {
+  return kind === "room"
+    ? { label: "酒店房间", headers: roomBatchHeaders, anchors: ["酒店", "房间号"] }
+    : { label: "入住需求", headers: needBatchHeaders, anchors: ["姓名"] };
+}
+
+function findBatchHeaderIndex(rows, kind = "need") {
+  const schema = batchImportSchema(kind);
+  const knownHeaders = new Set(schema.headers);
+  return rows.findIndex((row) => {
+    const headers = row.map((value) => normalizeBatchHeader(value, kind)).filter(Boolean);
+    const matches = headers.filter((header) => knownHeaders.has(header)).length;
+    return matches >= 3 && schema.anchors.every((anchor) => headers.includes(anchor));
+  });
+}
+
+function rowsToBatchRecords(rows, kind = "need") {
+  const schema = batchImportSchema(kind);
+  const headerIndex = findBatchHeaderIndex(rows, kind);
+  if (headerIndex < 0) {
+    throw new Error(`没有找到${schema.label}表头，请使用下载的上传模板，或检查姓名、序号、房间号等列名。`);
+  }
+  const headers = rows[headerIndex].map((value) => normalizeBatchHeader(value, kind));
+  return rows.slice(headerIndex + 1).map((row, rowOffset) => {
     const record = {};
     headers.forEach((header, index) => {
+      if (!header) return;
       record[header] = row[index] || "";
     });
+    Object.defineProperty(record, "__sourceRow", { value: headerIndex + rowOffset + 2, enumerable: false });
     return record;
   }).filter((record) => Object.values(record).some(Boolean));
 }
 
-function parseRoomBatchRows(text) {
+function parseRoomBatchRows(text, kind = "need") {
   const rows = /<table[\s>]/i.test(text) ? parseHtmlTable(text) : parseCsv(text);
-  return rowsToBatchRecords(rows);
+  return rowsToBatchRecords(rows, kind);
 }
 
 function columnNameToIndex(name) {
@@ -1465,9 +1521,24 @@ function xmlTextContent(node, tagName) {
 }
 
 function normalizeXlsxPath(target) {
-  const text = String(target || "").replace(/^\/+/, "");
-  if (text.startsWith("xl/")) return text;
-  return `xl/${text}`.replaceAll("/./", "/");
+  const text = String(target || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  const parts = (text.startsWith("xl/") ? text : `xl/${text}`).split("/");
+  const normalized = [];
+  parts.forEach((part) => {
+    if (!part || part === ".") return;
+    if (part === "..") normalized.pop();
+    else normalized.push(part);
+  });
+  return normalized.join("/");
+}
+
+function parseXmlDocument(xml, label) {
+  if (!xml) throw new Error(`${label}内容为空。`);
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (xmlChildren(doc, "parsererror").length) {
+    throw new Error(`${label}格式损坏或不完整。`);
+  }
+  return doc;
 }
 
 function findEndOfCentralDirectory(view) {
@@ -1484,6 +1555,9 @@ function readZipDirectory(buffer) {
   const endOffset = findEndOfCentralDirectory(view);
   const entryCount = view.getUint16(endOffset + 10, true);
   let offset = view.getUint32(endOffset + 16, true);
+  if (entryCount === 0xffff || offset === 0xffffffff) {
+    throw new Error("该 Excel 使用了超大文件结构，请在 Excel/WPS 中另存为普通 .xlsx 后再上传。");
+  }
   const entries = new Map();
 
   for (let index = 0; index < entryCount; index += 1) {
@@ -1507,6 +1581,9 @@ function readZipDirectory(buffer) {
     offset = nameStart + nameLength + extraLength + commentLength;
   }
 
+  if (entries.size !== entryCount) {
+    throw new Error("Excel 文件目录不完整，请重新保存文件后再上传。");
+  }
   return entries;
 }
 
@@ -1531,29 +1608,39 @@ async function zipEntryText(entries, path) {
 
 function parseSharedStrings(xml) {
   if (!xml) return [];
-  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const doc = parseXmlDocument(xml, "Excel 共享文本");
   return xmlChildren(doc, "si").map((item) => (
     xmlChildren(item, "t").map((textNode) => textNode.textContent || "").join("")
   ));
 }
 
-async function xlsxWorksheetPath(entries, preferredNames = ["上传需求汇总"]) {
+async function xlsxWorksheetCandidates(entries, preferredNames = []) {
   const workbookXml = await zipEntryText(entries, "xl/workbook.xml");
   const relsXml = await zipEntryText(entries, "xl/_rels/workbook.xml.rels");
-  const workbookDoc = new DOMParser().parseFromString(workbookXml, "application/xml");
-  const relsDoc = new DOMParser().parseFromString(relsXml, "application/xml");
+  const workbookDoc = parseXmlDocument(workbookXml, "Excel 工作簿");
+  const relsDoc = parseXmlDocument(relsXml, "Excel 工作表关系");
   const rels = new Map(xmlChildren(relsDoc, "Relationship").map((rel) => [
     rel.getAttribute("Id"),
     normalizeXlsxPath(rel.getAttribute("Target"))
   ]));
   const sheets = xmlChildren(workbookDoc, "sheet").map((sheet) => ({
     name: sheet.getAttribute("name") || "",
-    relId: sheet.getAttribute("r:id") || sheet.getAttribute("id") || ""
-  }));
-  const preferred = sheets.find((sheet) => preferredNames.includes(sheet.name)) || sheets.find((sheet) => sheet.name !== "检查结果") || sheets[0];
-  const path = rels.get(preferred?.relId);
-  if (!path) throw new Error("没有找到 xlsx 里的工作表。");
-  return path;
+    relId: sheet.getAttributeNS?.("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+      || sheet.getAttribute("r:id")
+      || sheet.getAttribute("id")
+      || ""
+  })).map((sheet) => ({ ...sheet, path: rels.get(sheet.relId) || "" })).filter((sheet) => sheet.path);
+  if (!sheets.length) throw new Error("没有找到 Excel 里的工作表。");
+  return sheets.sort((a, b) => {
+    const aIndex = preferredNames.indexOf(a.name);
+    const bIndex = preferredNames.indexOf(b.name);
+    const aRank = aIndex < 0 ? preferredNames.length : aIndex;
+    const bRank = bIndex < 0 ? preferredNames.length : bIndex;
+    if (aRank !== bRank) return aRank - bRank;
+    if (a.name === "检查结果") return 1;
+    if (b.name === "检查结果") return -1;
+    return 0;
+  });
 }
 
 function xlsxCellValue(cell, sharedStrings) {
@@ -1566,7 +1653,7 @@ function xlsxCellValue(cell, sharedStrings) {
 }
 
 function parseWorksheetRows(xml, sharedStrings) {
-  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const doc = parseXmlDocument(xml, "Excel 工作表");
   return xmlChildren(doc, "row").map((row) => {
     const values = [];
     xmlChildren(row, "c").forEach((cell, fallbackIndex) => {
@@ -1579,21 +1666,59 @@ function parseWorksheetRows(xml, sharedStrings) {
   }).filter((row) => row.some(Boolean));
 }
 
-async function parseXlsxBatchRows(file) {
+async function parseXlsxBatchRecords(file, kind = "need") {
   const entries = readZipDirectory(await file.arrayBuffer());
   const sharedStrings = parseSharedStrings(await zipEntryText(entries, "xl/sharedStrings.xml"));
-  const worksheetPath = await xlsxWorksheetPath(entries);
-  return parseWorksheetRows(await zipEntryText(entries, worksheetPath), sharedStrings);
+  const preferredNames = kind === "room"
+    ? ["酒店房间", "房间库存", "上传房间", "Sheet1"]
+    : ["上传需求汇总", "上传需求", "入住需求", "住宿需求", "Sheet1"];
+  const candidates = await xlsxWorksheetCandidates(entries, preferredNames);
+  for (const candidate of candidates) {
+    const xml = await zipEntryText(entries, candidate.path);
+    if (!xml) continue;
+    const rows = parseWorksheetRows(xml, sharedStrings);
+    if (findBatchHeaderIndex(rows, kind) >= 0) {
+      const records = rowsToBatchRecords(rows, kind);
+      if (records.length) return records;
+    }
+  }
+  const names = candidates.map((sheet) => sheet.name).filter(Boolean).join("、");
+  throw new Error(`已检查工作表：${names || "未命名工作表"}，但没有找到可识别的${batchImportSchema(kind).label}表头。`);
 }
 
-async function parseBatchRecordsFromFile(file) {
-  const isXlsx = /\.xlsx$/i.test(file.name) || file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (isXlsx) return rowsToBatchRecords(await parseXlsxBatchRows(file));
-  return parseRoomBatchRows(await file.text());
+async function parseBatchRecordsFromFile(file, kind = "need") {
+  const fileName = String(file.name || "").toLowerCase();
+  const zippedExcel = /\.(xlsx|xlsm|xltx)$/i.test(fileName)
+    || [
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-excel.sheet.macroenabled.12",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+    ].includes(String(file.type || "").toLowerCase());
+  if (zippedExcel) return parseXlsxBatchRecords(file, kind);
+
+  if (/\.xls$/i.test(fileName)) {
+    const signature = Array.from(new Uint8Array(await file.slice(0, 8).arrayBuffer()))
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    if (signature === "d0cf11e0a1b11ae1") {
+      throw new Error("该文件是旧版二进制 .xls，请在 Excel/WPS 中另存为 .xlsx 后再上传。");
+    }
+  }
+
+  if (!/\.(csv|tsv|xls|html?)$/i.test(fileName) && !String(file.type || "").startsWith("text/")) {
+    throw new Error("暂不支持该文件类型，请使用 .xlsx、.xlsm、.xltx、.csv 或 .tsv。");
+  }
+  const content = await file.text();
+  if (!content.trim()) throw new Error("文件内容为空。");
+  return parseRoomBatchRows(content, kind);
 }
 
 function normalizeDateValue(value) {
-  const text = String(value || "").trim().replaceAll("/", "-").replaceAll(".", "-");
+  const text = String(value || "")
+    .trim()
+    .replace(/[\/.\u5e74\u6708]/g, "-")
+    .replace(/\u65e5/g, "")
+    .replace(/\s+/g, " ");
   if (/^\d+(\.\d+)?$/.test(text)) {
     const serial = Number(text);
     if (serial >= 20000 && serial <= 80000) {
@@ -1601,9 +1726,27 @@ function normalizeDateValue(value) {
       return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
     }
   }
-  const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (!match) return "";
-  return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+  const ymd = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s|$)/);
+  const mdy = text.match(/^(\d{1,2})-(\d{1,2})-(\d{2}|\d{4})(?:\s|$)/);
+  const parts = ymd
+    ? [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+    : mdy
+      ? [Number(mdy[3]) < 100 ? 2000 + Number(mdy[3]) : Number(mdy[3]), Number(mdy[1]), Number(mdy[2])]
+      : null;
+  if (!parts) return "";
+  const [year, month, day] = parts;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return "";
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function normalizeBatchDateValue(value, label) {
+  const raw = String(value || "").trim();
+  const normalized = normalizeDateValue(raw);
+  if (raw && !normalized) {
+    throw new Error(`${label}无法识别：${raw}。请使用 2026-08-01 或 2026/8/1 格式。`);
+  }
+  return normalized;
 }
 
 function recordValue(record, keys) {
@@ -1664,12 +1807,13 @@ function companionsFromBatchRecord(record, mainIdentity) {
 }
 
 function batchNeedCommonFields(record) {
+  const rowLabel = record.__sourceRow ? `第 ${record.__sourceRow} 行` : "";
   return {
     hotel: normalizeArrangementHotel(recordValue(record, ["安排酒店", "酒店"])),
     roomType: normalizeNeedRoomType(recordValue(record, ["房间类型", "期望房型"])),
     roomNo: record["房间号"] || "",
-    checkIn: normalizeDateValue(record["入住日期"]),
-    checkOut: normalizeDateValue(record["离店日期"])
+    checkIn: normalizeBatchDateValue(record["入住日期"], `${rowLabel}入住日期`),
+    checkOut: normalizeBatchDateValue(record["离店日期"], `${rowLabel}离店日期`)
   };
 }
 
@@ -1686,7 +1830,8 @@ function assertGroupedNeedConsistency(records, sequence) {
     const current = batchNeedCommonFields(record);
     Object.keys(fieldLabels).forEach((key) => {
       if (current[key] !== first[key]) {
-        throw new Error(`序号 ${sequence} 的${fieldLabels[key]}不一致，请统一后再上传`);
+        const rowLabel = record.__sourceRow ? `（第 ${record.__sourceRow} 行）` : "";
+        throw new Error(`序号 ${sequence} 的${fieldLabels[key]}不一致${rowLabel}，请统一后再上传`);
       }
     });
   });
@@ -1740,7 +1885,7 @@ function needsFromBatchRecords(records) {
   const groups = new Map();
   records.forEach((record, index) => {
     const sequence = String(record["序号"] || "").trim();
-    if (!sequence) throw new Error(`第 ${index + 2} 行缺少序号`);
+    if (!sequence) throw new Error(`第 ${record.__sourceRow || index + 2} 行缺少序号`);
     if (!groups.has(sequence)) groups.set(sequence, []);
     groups.get(sequence).push(record);
   });
@@ -1748,15 +1893,16 @@ function needsFromBatchRecords(records) {
 }
 
 function roomFromBatchRecord(record, index) {
+  const sourceRow = record.__sourceRow || index + 2;
   const hotel = record["酒店"]?.trim();
   const roomNo = record["房间号"]?.trim();
-  const availableFrom = normalizeDateValue(record["可用开始日期"]);
-  const availableTo = normalizeDateValue(record["可用结束日期"]);
+  const availableFrom = normalizeBatchDateValue(record["可用开始日期"], `第 ${sourceRow} 行可用开始日期`);
+  const availableTo = normalizeBatchDateValue(record["可用结束日期"], `第 ${sourceRow} 行可用结束日期`);
   if (!hotel || !roomNo || !availableFrom || !availableTo) {
-    throw new Error(`第 ${index + 2} 行缺少酒店、房间号或可用日期`);
+    throw new Error(`第 ${sourceRow} 行缺少酒店、房间号或可用日期`);
   }
   if (availableFrom >= availableTo) {
-    throw new Error(`第 ${index + 2} 行可用结束日期必须晚于开始日期`);
+    throw new Error(`第 ${sourceRow} 行可用结束日期必须晚于开始日期`);
   }
   const type = roomTypeOptions.includes(record["房型"]) ? record["房型"] : "其他";
   const defaultUse = roomUseOptions.includes(record["默认用途"]) ? record["默认用途"] : "未分配";
@@ -1812,19 +1958,27 @@ function needFromBatchRecord(record, index) {
   };
 }
 
+async function showBatchImportError(file, error, label) {
+  const reason = error?.message || "未知错误";
+  await showUploadDialog({
+    title: `${label}上传失败`,
+    message: reason,
+    meta: [
+      `<span>文件：${escapeHtml(file?.name || "未知文件")}</span>`,
+      "<span>支持：.xlsx、.xlsm、.xltx、.csv、.tsv，以及网站下载的 .xls 模板</span>",
+      "<span>未识别成功时不会写入任何数据</span>"
+    ].join(""),
+    primaryText: "知道了",
+    hideSecondary: true
+  });
+}
+
 async function importRoomBatch(file) {
-  const records = await parseBatchRecordsFromFile(file);
+  const records = await parseBatchRecordsFromFile(file, "room");
   if (!records.length) {
-    alert("没有识别到可导入的房间数据，请使用下载模板填写后再上传。");
-    return;
+    throw new Error("没有识别到可导入的房间数据，请使用下载模板填写后再上传。");
   }
-  const rooms = [];
-  try {
-    records.forEach((record, index) => rooms.push(roomFromBatchRecord(record, index)));
-  } catch (error) {
-    alert(error.message);
-    return;
-  }
+  const rooms = records.map((record, index) => roomFromBatchRecord(record, index));
   rooms.forEach((room) => {
     state.rooms.push({ id: nextId("R", state.rooms), ...room });
     if (!state.hotels.some((hotel) => hotel.name === room.hotel || hotel.id === room.hotel)) {
@@ -1839,21 +1993,13 @@ async function importRoomBatch(file) {
 
 async function importNeedBatch(file) {
   if (uploadInProgress) {
-    alert("当前已有上传任务正在进行，请等待完成后再上传。");
-    return;
+    throw new Error("当前已有上传任务正在进行，请等待完成后再上传。");
   }
-  const records = await parseBatchRecordsFromFile(file);
+  const records = await parseBatchRecordsFromFile(file, "need");
   if (!records.length) {
-    alert("没有识别到可导入的入住需求，请使用下载模板填写后再上传。");
-    return;
+    throw new Error("没有识别到可导入的入住需求，请使用下载模板填写后再上传。");
   }
-  const needs = [];
-  try {
-    needs.push(...needsFromBatchRecords(records));
-  } catch (error) {
-    alert(error.message);
-    return;
-  }
+  const needs = needsFromBatchRecords(records);
   const task = createNeedUploadTask(needs);
   savePendingUploadTask(task);
   await runNeedUploadTask(task);
@@ -2697,8 +2843,13 @@ function bindEvents() {
   $("#needBatchInput").addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (!file) return;
-    await importNeedBatch(file);
-    event.target.value = "";
+    try {
+      await importNeedBatch(file);
+    } catch (error) {
+      await showBatchImportError(file, error, "入住需求");
+    } finally {
+      event.target.value = "";
+    }
   });
 
   $("#addRoomBtn")?.addEventListener("click", () => {
@@ -2719,8 +2870,13 @@ function bindEvents() {
   $("#roomBatchInput")?.addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (!file) return;
-    await importRoomBatch(file);
-    event.target.value = "";
+    try {
+      await importRoomBatch(file);
+    } catch (error) {
+      await showBatchImportError(file, error, "酒店房间");
+    } finally {
+      event.target.value = "";
+    }
   });
 
   $("#addChangeBtn")?.addEventListener("click", () => {
