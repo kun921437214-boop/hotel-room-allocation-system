@@ -1454,6 +1454,8 @@ function columnNameToIndex(name) {
 }
 
 function xmlChildren(node, tagName) {
+  const namespaced = node.getElementsByTagNameNS?.("*", tagName);
+  if (namespaced?.length) return Array.from(namespaced);
   return Array.from(node.getElementsByTagName(tagName));
 }
 
