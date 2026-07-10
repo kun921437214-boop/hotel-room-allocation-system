@@ -13,6 +13,7 @@ const OBSOLETE_READABLE_TABLE_NAMES = ["入住需求查看", "酒店房间查看
 const ARRANGEMENT_HOTELS = ["诺富特", "宜必思", "施柏阁", "大观"];
 const IDENTITY_OPTIONS = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const ROOM_TYPE_FIELDS = ["双标", "大床", "套房", "其他"];
+const LEGACY_SNAPSHOT_MAX_BYTES = 90 * 1024;
 
 const sampleData = {
   hotels: [
@@ -382,18 +383,22 @@ async function getSyncRecord(tableId) {
   return records.find((record) => record.fields?.["数据键"] === SYNC_RECORD_KEY);
 }
 
-async function createSyncRecord(tableId, state) {
+function syncSnapshotText(snapshot) {
+  return typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot);
+}
+
+async function createSyncRecord(tableId, snapshot) {
   const fields = {
     "数据键": SYNC_RECORD_KEY,
-    "JSON内容": JSON.stringify(state),
+    "JSON内容": syncSnapshotText(snapshot),
     "最后更新时间": new Date().toISOString()
   };
   return feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records`, { fields });
 }
 
-async function updateSyncRecord(tableId, recordId, state) {
+async function updateSyncRecord(tableId, recordId, snapshot) {
   const fields = {
-    "JSON内容": JSON.stringify(state),
+    "JSON内容": syncSnapshotText(snapshot),
     "最后更新时间": new Date().toISOString()
   };
   return feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${recordId}`, { fields });
@@ -717,9 +722,29 @@ function stateSummary(state) {
   };
 }
 
+function snapshotPayload(state) {
+  const fullSnapshot = JSON.stringify(state);
+  if (Buffer.byteLength(fullSnapshot, "utf8") <= LEGACY_SNAPSHOT_MAX_BYTES) {
+    return { json: fullSnapshot, compact: false };
+  }
+  return {
+    compact: true,
+    json: JSON.stringify({
+      schema: "core-tables-v1",
+      mode: "summary",
+      generatedAt: nowIso(),
+      summary: stateSummary(state),
+      hotels: Array.isArray(state?.hotels) ? state.hotels : [],
+      eventDates: Array.isArray(state?.eventDates) ? state.eventDates : [],
+      notice: "住宿明细已超过单字段备份容量，请以住宿需求核心表和住宿人员明细表为准。"
+    })
+  };
+}
+
 function backupFields(state, options = {}) {
   const date = options.date || todayKey();
   const summary = stateSummary(state);
+  const snapshot = snapshotPayload(state);
   return {
     "备份ID": options.id || `BACKUP-${date}-${Date.now()}`,
     "备份类型": options.type || "每日备份",
@@ -730,8 +755,11 @@ function backupFields(state, options = {}) {
     "需求数": String(summary.needCount),
     "人数": String(summary.peopleCount),
     "间夜": String(summary.nightCount),
-    "JSON内容": JSON.stringify(state),
-    "说明": options.reason || "网站自动备份"
+    "JSON内容": snapshot.json,
+    "说明": [
+      options.reason || "网站自动备份",
+      snapshot.compact ? "明细数据量较大，已保存安全摘要，完整明细以核心表为准" : ""
+    ].filter(Boolean).join("；")
   };
 }
 
@@ -865,12 +893,23 @@ async function migrateLegacyStateIfNeeded() {
 }
 
 async function refreshLegacySnapshot(state) {
+  const snapshot = snapshotPayload(state);
   const tableId = await ensureSyncTableId();
   const record = await getSyncRecord(tableId);
   if (record?.record_id) {
-    await updateSyncRecord(tableId, record.record_id, state);
+    await updateSyncRecord(tableId, record.record_id, snapshot.json);
   } else {
-    await createSyncRecord(tableId, state);
+    await createSyncRecord(tableId, snapshot.json);
+  }
+  return snapshot.compact;
+}
+
+async function tryRefreshLegacySnapshot(state) {
+  try {
+    const compact = await refreshLegacySnapshot(state);
+    return compact ? "旧版 JSON 镜像已改为安全摘要，完整明细已保存在核心表。" : "";
+  } catch (error) {
+    return `旧版 JSON 镜像未更新：${error.message || "未知错误"}`;
   }
 }
 
@@ -1109,6 +1148,7 @@ async function handler(req, res) {
     const deferMirror = body?.deferMirror === true;
     const shouldSyncReadableViews = body?.action === "refreshViews";
     let cleanupResult = null;
+    let legacySnapshotWarning = "";
     let beforeWrite = null;
     const readBeforeWrite = async () => {
       if (!beforeWrite) beforeWrite = await readCoreState(tableIds);
@@ -1214,9 +1254,9 @@ async function handler(req, res) {
     } else if (body?.action === "cleanupDuplicates") {
       cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
       const { state, version } = await readCoreState(tableIds);
-      await refreshLegacySnapshot(state);
+      legacySnapshotWarning = await tryRefreshLegacySnapshot(state);
       await tryDailyBackup(state, tableIds, "清理重复数据后自动备份");
-      return json(res, 200, { ok: true, state, version, source: "core_tables", cleanup: cleanupResult });
+      return json(res, 200, { ok: true, state, version, source: "core_tables", cleanup: cleanupResult, legacySnapshotWarning });
     } else if (body?.action === "refreshViews") {
       cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
       await recordOperation("刷新展示", "", "网站刷新住宿展示数据", tableIds);
@@ -1229,7 +1269,7 @@ async function handler(req, res) {
     }
 
     const { state, version } = await readCoreState(tableIds);
-    await refreshLegacySnapshot(state);
+    legacySnapshotWarning = await tryRefreshLegacySnapshot(state);
     await tryDailyBackup(state, tableIds, "保存数据后自动备份");
     let mirrorError = "";
     if (shouldSyncReadableViews) {
@@ -1239,7 +1279,7 @@ async function handler(req, res) {
         mirrorError = error.message || "飞书查看表同步失败";
       }
     }
-    return json(res, 200, { ok: true, state, version, source: "core_tables", mirrorError, cleanup: cleanupResult });
+    return json(res, 200, { ok: true, state, version, source: "core_tables", mirrorError, cleanup: cleanupResult, legacySnapshotWarning });
   } catch (error) {
     return json(res, 500, { ok: false, error: error.message || "同步失败" });
   }
