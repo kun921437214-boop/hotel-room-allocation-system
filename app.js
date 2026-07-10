@@ -1,5 +1,6 @@
 const storageKey = "hotelRoomOpsLocalSystem.v5.roomAvailability";
 const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
+const workbookExportApiUrl = window.HOTEL_ROOM_WORKBOOK_EXPORT_API || "/api/export-workbook";
 const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
 
 const sampleData = {
@@ -1013,6 +1014,49 @@ function downloadBlob(filename, content, type) {
   URL.revokeObjectURL(url);
 }
 
+async function exportOverviewWorkbook() {
+  const needs = visibleNeeds();
+  if (!needs.length) {
+    alert("当前没有可导出的住宿需求。");
+    return;
+  }
+  const button = $("#exportOverviewWorkbookBtn");
+  const originalText = button?.textContent || "导出工作总表";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在生成...";
+  }
+  try {
+    const response = await fetch(workbookExportApiUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        needs,
+        dates: activeDates(),
+        roomCapacityTotals
+      })
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.message || `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `活动住宿工作总表-${dateToValue(new Date())}.xlsx`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(`导出失败：${error.message || "请稍后重试"}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
 function downloadRoomTemplate() {
   const rows = [
     roomBatchHeaders,
@@ -1830,6 +1874,8 @@ function setView(view) {
     changes: "变更记录"
   };
   $("#viewTitle").textContent = titles[view];
+  const exportButton = $("#exportOverviewWorkbookBtn");
+  if (exportButton) exportButton.hidden = view !== "dashboard";
   render();
 }
 
@@ -2571,6 +2617,7 @@ function changeFields() {
 function bindEvents() {
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.view)));
   $("#searchInput").addEventListener("input", render);
+  $("#exportOverviewWorkbookBtn")?.addEventListener("click", exportOverviewWorkbook);
   $("#needHotelFilter")?.addEventListener("change", renderNeeds);
   $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
   $("#calendarIdentity").addEventListener("change", renderCalendar);

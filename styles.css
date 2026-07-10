@@ -213,6 +213,12 @@ button {
   color: var(--ink);
 }
 
+.topbar-export-btn {
+  height: 42px;
+  min-height: 42px;
+  padding: 0 14px;
+}
+
 .danger-btn {
   background: var(--red-soft);
   color: var(--red);
@@ -306,6 +312,30 @@ label.file-btn {
   padding: 16px;
   min-height: 118px;
   box-shadow: var(--shadow);
+}
+
+#dashboardView .kpi-grid {
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+#dashboardView .kpi {
+  min-height: 106px;
+  padding: 14px;
+  box-shadow: 0 8px 24px rgba(18, 38, 63, 0.06);
+}
+
+#dashboardView .kpi strong {
+  font-size: 28px;
+  margin: 6px 0 2px;
+}
+
+#dashboardView .dashboard-grid {
+  gap: 14px;
+}
+
+#dashboardView .panel {
+  box-shadow: 0 8px 24px rgba(18, 38, 63, 0.06);
 }
 
 .kpi span {
@@ -1416,6 +1446,7 @@ dialog::backdrop {
 
   .search,
   .sync-status,
+  .topbar-export-btn,
   .table-actions > span,
   .filter-row > .calendar-date-range {
     grid-column: 1 / -1;
