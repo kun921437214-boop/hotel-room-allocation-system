@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "check": "node --check app.js && node --check api/state.js && node --check api/export-workbook.js && node --check lib/overview-workbook.js && node --check lib/state-utils.js && node scripts/test-state.js && node scripts/test-state-api.js && node scripts/test-overview-workbook.js"
+    "check": "node --check app.js && node --check api/state.js && node --check api/export-workbook.js && node --check lib/overview-workbook.js && node --check lib/state-utils.js && node --check scripts/refresh-views.js && node scripts/test-state.js && node scripts/test-state-api.js && node scripts/test-overview-workbook.js",
+    "maintenance:refresh": "node scripts/refresh-views.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0"

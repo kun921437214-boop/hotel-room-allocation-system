@@ -113,12 +113,24 @@ function testReplayAndStatistics() {
   assert.equal(roleRows.some((row) => row["人员性质"] === "嘉宾"), false);
 }
 
+function testRefreshStages() {
+  assert.deepEqual(_internal.refreshViewStages, ["schema", "backup", "people", "personList", "hotelStats", "roleStats", "cleanup"]);
+  assert.equal(_internal.nextRefreshStage("schema"), "backup");
+  assert.equal(_internal.nextRefreshStage("cleanup"), "");
+  assert.equal(_internal.validateMutationBody({ action: "refreshViews" }).stage, "schema");
+  assert.throws(
+    () => _internal.validateMutationBody({ action: "refreshViews", stage: "everything" }),
+    /未知的查看表刷新步骤/
+  );
+}
+
 function run() {
   testValidation();
   testStableVersion();
   testBackupRoundTrip();
   testJsonCoreIsAuthoritative();
   testReplayAndStatistics();
+  testRefreshStages();
 }
 
 run();

@@ -26,6 +26,12 @@ const IDENTITY_OPTIONS = ["工作人员", "评委", "嘉宾", "承办单位", "�
 const ROOM_TYPE_FIELDS = ["双标", "大床", "套房", "其他"];
 const LEGACY_SNAPSHOT_MAX_BYTES = 90 * 1024;
 const REQUEST_BODY_MAX_BYTES = 2 * 1024 * 1024;
+const REFRESH_VIEW_STAGES = ["schema", "backup", "people", "personList", "hotelStats", "roleStats", "cleanup"];
+const REFRESH_STAGE_TABLES = {
+  personList: "住宿人员名单",
+  hotelStats: "酒店统计查看",
+  roleStats: "角色统计查看"
+};
 
 const sampleData = {
   hotels: [
@@ -228,7 +234,7 @@ async function allTables() {
   return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables`, 100);
 }
 
-async function ensureReadableTable(tableName, fields) {
+async function ensureReadableTable(tableName, fields, knownTables = null) {
   if (readableTableCache[tableName]) {
     if (!readableSchemaReady[tableName]) {
       await ensureReadableFields(readableTableCache[tableName], fields);
@@ -236,7 +242,7 @@ async function ensureReadableTable(tableName, fields) {
     }
     return readableTableCache[tableName];
   }
-  const tables = await allTables();
+  const tables = knownTables || await allTables();
   const existing = tables.find((table) => table.name === tableName);
   if (existing?.table_id) {
     readableTableCache[tableName] = existing.table_id;
@@ -454,10 +460,10 @@ async function upsertReadableRecords(tableId, keyField, rows) {
   for (const group of groupedExisting.values()) {
     if (group.length <= 1) continue;
     for (const duplicate of group.slice(1)) {
-      await feishu("DELETE", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/${duplicate.record_id}`);
       duplicateRecordIds.add(duplicate.record_id);
     }
   }
+  await batchDeleteRecords(tableId, Array.from(duplicateRecordIds));
 
   const uniqueExistingRecords = existingRecords.filter((record) => !duplicateRecordIds.has(record.record_id));
   const existingByKey = new Map(uniqueExistingRecords.map((record) => [String(record.fields?.[keyField] || ""), record]));
@@ -486,6 +492,12 @@ async function upsertReadableRecords(tableId, keyField, rows) {
     }
   }
   await batchDeleteRecords(tableId, deletes);
+  return {
+    created: creates.length,
+    updated: updates.length,
+    deleted: deletes.length,
+    duplicateDeleted: duplicateRecordIds.size
+  };
 }
 
 async function getSyncRecord(tableId) {
@@ -1425,8 +1437,46 @@ async function syncReadableMirrorTables(state) {
   await deleteObsoleteReadableTables();
 }
 
+async function ensureReadableMirrorSchemas(state) {
+  const tables = readableMirrorTables(state);
+  const knownTables = await allTables();
+  for (const table of tables) {
+    await ensureReadableTable(table.name, table.fields, knownTables);
+  }
+  return { tables: tables.map((table) => table.name) };
+}
+
+async function syncReadableMirrorStage(state, stage) {
+  const tableName = REFRESH_STAGE_TABLES[stage];
+  if (!tableName) throw new ValidationError(`未知的查看表刷新步骤：${stage}。`);
+  const table = readableMirrorTables(state).find((item) => item.name === tableName);
+  if (!table) throw new Error(`没有找到查看表定义：${tableName}。`);
+  const tableId = await ensureReadableTable(table.name, table.fields);
+  const result = await upsertReadableRecords(tableId, table.keyField, table.rows);
+  return { table: table.name, rows: table.rows.length, ...result };
+}
+
+function nextRefreshStage(stage) {
+  const index = REFRESH_VIEW_STAGES.indexOf(stage);
+  return index >= 0 && index < REFRESH_VIEW_STAGES.length - 1 ? REFRESH_VIEW_STAGES[index + 1] : "";
+}
+
+async function createMaintenanceBackup(state, version, tableIds, operationId) {
+  const digest = crypto.createHash("sha256").update(`${operationId}:${version}`).digest("hex").slice(0, 16);
+  return writeBackupGroup(state, tableIds, {
+    id: `MANUAL-${todayKey()}-${digest}`,
+    type: "手动完整备份",
+    date: todayKey(),
+    operation: "维护刷新前备份",
+    reason: "查看表维护前生成的可恢复完整备份",
+    replaceExisting: true
+  });
+}
+
 function shouldCheckStateVersion(body) {
-  return ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds", "cleanupDuplicates"].includes(body?.action) || Boolean(body?.state);
+  return ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds", "cleanupDuplicates"].includes(body?.action) ||
+    (body?.action === "refreshViews" && body?.stage === "backup") ||
+    Boolean(body?.state);
 }
 
 function shouldCreateOperationBackup(body) {
@@ -1473,8 +1523,13 @@ function validateMutationBody(body) {
   } else if (body.action === "deleteNeeds") {
     if (!Array.isArray(body.needIds) || body.needIds.length > 1000) throw new ValidationError("批量删除列表无效或超过 1000 条。", 413);
     normalized.needIds = Array.from(new Set(body.needIds.map((id) => String(id || "").trim()).filter(Boolean)));
-  } else if (["cleanupDuplicates", "refreshViews"].includes(body.action)) {
+  } else if (body.action === "cleanupDuplicates") {
     // 维护动作没有业务数据负载。
+  } else if (body.action === "refreshViews") {
+    normalized.stage = String(body.stage || "schema");
+    if (!REFRESH_VIEW_STAGES.includes(normalized.stage)) {
+      throw new ValidationError(`未知的查看表刷新步骤：${normalized.stage}。`);
+    }
   } else if (body.state && typeof body.state === "object") {
     normalized.state = { ...body.state, needs: validateNeedsPayload(body.state.needs || []) };
   } else {
@@ -1496,12 +1551,14 @@ function operationLogOptions(body, requestId, count) {
 }
 
 async function processMutation(body, requestId) {
-  const tableIds = await ensureCoreTableIds();
+  const isRefreshViews = body.action === "refreshViews";
+  const tableIds = await ensureCoreTableIds({ ensureSchema: !isRefreshViews || body.stage === "schema" });
   const deferMirror = body.deferMirror === true;
-  const shouldSyncReadableViews = body.action === "refreshViews";
   let cleanupResult = null;
+  let maintenanceResult = null;
   let personMirrorError = "";
   let operationLogError = "";
+  let legacySnapshotWarning = "";
   let beforeWrite = null;
   const readBeforeWrite = async () => {
     if (!beforeWrite) beforeWrite = await readCoreState(tableIds);
@@ -1591,8 +1648,28 @@ async function processMutation(body, requestId) {
     logArgs = ["清理重复", "", `清理重复需求 ${cleanupResult.deletedNeeds} 条、重复人员 ${cleanupResult.deletedPeople} 条`, cleanupResult.deletedNeeds + cleanupResult.deletedPeople];
   } else if (body.action === "refreshViews") {
     const current = await readBeforeWrite();
-    const repair = await repairPersonCoreMirror(current.state, tableIds, body.operationId);
-    logArgs = ["刷新展示", "", `网站刷新住宿展示数据，并修复人员明细：更新 ${repair.updated} 条、新增 ${repair.created} 条`, repair.updated + repair.created];
+    let result = {};
+    if (body.stage === "schema") {
+      result = await ensureReadableMirrorSchemas(current.state);
+    } else if (body.stage === "backup") {
+      result = await createMaintenanceBackup(current.state, current.version, tableIds, body.operationId);
+    } else if (body.stage === "people") {
+      result = await repairPersonCoreMirror(current.state, tableIds, body.operationId);
+    } else if (REFRESH_STAGE_TABLES[body.stage]) {
+      result = await syncReadableMirrorStage(current.state, body.stage);
+    } else if (body.stage === "cleanup") {
+      await deleteObsoleteReadableTables();
+      legacySnapshotWarning = await tryRefreshLegacySnapshot(current.state);
+      result = { cleaned: true };
+    }
+    maintenanceResult = {
+      stage: body.stage,
+      nextStage: nextRefreshStage(body.stage),
+      complete: body.stage === REFRESH_VIEW_STAGES[REFRESH_VIEW_STAGES.length - 1],
+      ...result
+    };
+    const affected = Number(result.rows || result.updated || result.created || 0);
+    logArgs = ["分段刷新展示", "", `完成查看表维护步骤 ${body.stage}`, affected];
   } else if (body.state && typeof body.state === "object") {
     const current = await readBeforeWrite();
     const needs = body.state.needs || [];
@@ -1613,18 +1690,10 @@ async function processMutation(body, requestId) {
     }
   }
 
-  const { state, version } = await readCoreState(tableIds);
+  const finalCore = isRefreshViews && beforeWrite ? beforeWrite : await readCoreState(tableIds);
+  const { state, version } = finalCore;
   if (shouldCreateOperationBackup(body)) await tryDailyBackup(state, tableIds, "当日首次修改后完整备份");
   let mirrorError = "";
-  let legacySnapshotWarning = "";
-  if (shouldSyncReadableViews) {
-    try {
-      await syncReadableMirrorTables(state);
-    } catch (error) {
-      mirrorError = error.message || "飞书查看表同步失败";
-    }
-    legacySnapshotWarning = await tryRefreshLegacySnapshot(state);
-  }
   return {
     status: 200,
     body: {
@@ -1637,6 +1706,7 @@ async function processMutation(body, requestId) {
       personMirrorError,
       operationLogError,
       cleanup: cleanupResult,
+      maintenance: maintenanceResult,
       legacySnapshotWarning
     }
   };
@@ -1707,8 +1777,10 @@ module.exports._internal = {
   backupRows,
   backupStateFromRecords,
   mutationAlreadyApplied,
+  nextRefreshStage,
   personListRows,
   readableMirrorTables,
+  refreshViewStages: REFRESH_VIEW_STAGES,
   restoreBackupById,
   stateFromCoreRecords,
   stateVersion,
