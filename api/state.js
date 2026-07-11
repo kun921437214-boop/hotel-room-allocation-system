@@ -1180,7 +1180,7 @@ function stateFromCoreRecords(needRecords, personRecords) {
           note: fields["备注"] || storedNeed.note || "",
           uploadBatchId: fields["上传批次"] || storedNeed.uploadBatchId || "",
           uploadBatchName: fields["上传批次"] || storedNeed.uploadBatchName || "",
-          uploadBatchTime: fields["上传时间"] || storedNeed.uploadBatchTime || ""
+          uploadBatchTime: fields["上传时间"] || storedNeed.uploadBatchTime || fields["创建时间"] || storedNeed.createdAt || ""
         };
       } catch (error) {
         logEvent("warn", "need_json_invalid", { needId: fields["需求ID"] || "", error: error.message || "JSON解析失败" });
@@ -1207,7 +1207,7 @@ function stateFromCoreRecords(needRecords, personRecords) {
       note: fields["备注"] || "",
       uploadBatchId: fields["上传批次"] || "",
       uploadBatchName: fields["上传批次"] || "",
-      uploadBatchTime: fields["上传时间"] || "",
+      uploadBatchTime: fields["上传时间"] || fields["创建时间"] || "",
       sameRoom: "是",
       share: "否",
       quiet: "否",

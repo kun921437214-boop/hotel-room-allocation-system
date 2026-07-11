@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>活动酒店房间分配系统</title>
-    <link rel="stylesheet" href="./styles.css?v=20260711-sync">
+    <link rel="stylesheet" href="./styles.css?v=20260711-sort">
   </head>
   <body>
     <div class="app-shell">
@@ -156,6 +156,14 @@
             <label>人员性质筛选
               <select id="needIdentityFilter"></select>
             </label>
+            <label>排序方式
+              <select id="needSort">
+                <option value="uploadDesc">上传时间：最新优先</option>
+                <option value="uploadAsc">上传时间：最早优先</option>
+                <option value="checkInAsc">入住日期：早到晚</option>
+                <option value="checkInDesc">入住日期：晚到早</option>
+              </select>
+            </label>
           </div>
           <div class="table-wrap">
             <table id="needsTable"></table>
@@ -290,7 +298,7 @@
       </div>
     </dialog>
 
-    <script src="./lib/client-sync-utils.js?v=20260711-sync"></script>
-    <script src="./app.js?v=20260711-sync"></script>
+    <script src="./lib/client-sync-utils.js?v=20260711-sort"></script>
+    <script src="./app.js?v=20260711-sort"></script>
   </body>
 </html>

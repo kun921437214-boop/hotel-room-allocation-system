@@ -1007,6 +1007,33 @@ function currentFilteredNeeds() {
   ));
 }
 
+function compareNeedSortValues(left, right, direction) {
+  if (!left && !right) return 0;
+  if (!left) return 1;
+  if (!right) return -1;
+  if (left === right) return 0;
+  return left < right ? -direction : direction;
+}
+
+function currentSortedNeeds() {
+  const mode = $("#needSort")?.value || "uploadDesc";
+  const [field, direction] = mode === "uploadAsc"
+    ? ["upload", 1]
+    : mode === "checkInAsc"
+      ? ["checkIn", 1]
+      : mode === "checkInDesc"
+        ? ["checkIn", -1]
+        : ["upload", -1];
+  return currentFilteredNeeds()
+    .map((need, index) => ({ need, index }))
+    .sort((left, right) => {
+      const leftValue = field === "upload" ? (left.need.uploadBatchTime || left.need.createdAt || "") : (left.need.checkIn || "");
+      const rightValue = field === "upload" ? (right.need.uploadBatchTime || right.need.createdAt || "") : (right.need.checkIn || "");
+      return compareNeedSortValues(leftValue, rightValue, direction) || left.index - right.index;
+    })
+    .map((item) => item.need);
+}
+
 function formatDateForDisplay(value) {
   return value ? value.replaceAll("-", "/") : "";
 }
@@ -1352,7 +1379,7 @@ function downloadStyledWorkbook(filename, sheets) {
 }
 
 function exportCurrentNeeds() {
-  const needs = currentFilteredNeeds();
+  const needs = currentSortedNeeds();
   if (!needs.length) {
     alert("当前搜索条件下没有可导出的入住需求。");
     return;
@@ -2630,7 +2657,7 @@ function stayTimeCell(need) {
 }
 
 function renderNeeds() {
-  const rows = currentFilteredNeeds()
+  const rows = currentSortedNeeds()
     .map((need, index) => ({
       ...need,
       sequence: index + 1,
@@ -2938,6 +2965,7 @@ function bindEvents() {
   });
   $("#needHotelFilter")?.addEventListener("change", renderNeeds);
   $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
+  $("#needSort")?.addEventListener("change", renderNeeds);
   $("#calendarIdentity").addEventListener("change", renderCalendar);
   $("#exportHotelStatsBtn")?.addEventListener("click", exportHotelStats);
   $("#roleHotel").addEventListener("change", renderRoleStats);
@@ -2997,7 +3025,7 @@ function bindEvents() {
       roomType: "双标"
     }, (values) => {
       validateOptionalStayDates(values.checkIn, values.checkOut, "入住需求");
-      const need = { id: nextId("REQ-", state.needs), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) };
+      const need = { id: nextId("REQ-", state.needs), uploadBatchTime: new Date().toISOString(), children: 0, sameRoom: "是", share: "否", quiet: "否", smokeFree: "否", lowFloor: "否", nearElevator: "否", confirmed: "否", ...normalizeNeedValues(values) };
       state.needs.push(need);
       addDatesToEventRange(nightsBetween(need.checkIn, need.checkOut));
       return {
