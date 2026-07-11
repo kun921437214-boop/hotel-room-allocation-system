@@ -2146,6 +2146,10 @@ function renderHeatmap() {
 }
 
 function renderTasks() {
+  const openTaskTypes = new Set(
+    Array.from(document.querySelectorAll("#taskList details[open][data-task-type]"))
+      .map((item) => item.dataset.taskType)
+  );
   const taskGroups = {
     hotel: new Set(),
     date: new Set(),
@@ -2173,10 +2177,14 @@ function renderTasks() {
     ["待补充房间号", taskGroups.roomNo, "status-yellow"]
   ].filter(([, names]) => names.size);
   $("#taskList").innerHTML = tasks.length ? tasks.map(([type, names, cls]) => `
-    <div class="task ${cls}">
-      <strong>${type}：${Array.from(names).join("、")}</strong>
-      <span>共 ${names.size} 人需要处理</span>
-    </div>
+    <details class="task task-collapse ${cls}" data-task-type="${escapeHtml(type)}" ${openTaskTypes.has(type) ? "open" : ""}>
+      <summary>
+        <strong>${escapeHtml(type)}</strong>
+        <span>共 ${names.size} 人</span>
+        <span class="task-collapse-icon" aria-hidden="true"></span>
+      </summary>
+      <div class="task-collapse-body">${Array.from(names).map(escapeHtml).join("、")}</div>
+    </details>
   `).join("") : `<div class="task status-green"><strong>暂无待补信息</strong><span>当前入住需求的酒店、日期、基础信息和房间号都已填写。</span></div>`;
 }
 

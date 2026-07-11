@@ -355,7 +355,7 @@ label.file-btn {
 }
 
 .dashboard-grid {
-  align-items: start;
+  align-items: stretch;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
@@ -486,6 +486,72 @@ label.file-btn {
 .assignment span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.task-collapse {
+  display: block;
+  overflow: hidden;
+  padding: 0;
+}
+
+.task-collapse summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  list-style: none;
+  min-height: 52px;
+  padding: 11px 12px;
+}
+
+.task-collapse summary::-webkit-details-marker {
+  display: none;
+}
+
+.task-collapse summary::marker {
+  content: "";
+}
+
+.task-collapse-icon {
+  border-bottom: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+  display: block;
+  height: 7px;
+  justify-self: center;
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform 160ms ease;
+  width: 7px;
+}
+
+.task-collapse[open] .task-collapse-icon {
+  transform: rotate(225deg) translate(-2px, -2px);
+}
+
+.task-collapse summary strong {
+  font-size: 14px;
+}
+
+.task-collapse summary span {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.task-collapse summary .task-collapse-icon {
+  font-size: 0;
+}
+
+.task-collapse[open] summary {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.1);
+}
+
+.task-collapse-body {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  padding: 10px 12px 12px;
 }
 
 .bar-row {
