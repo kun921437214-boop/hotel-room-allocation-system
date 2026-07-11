@@ -1,4 +1,15 @@
 const crypto = require("crypto");
+const {
+  ValidationError,
+  canonicalStateVersion,
+  decodeStateBackup,
+  encodeStateBackup,
+  needsEqual,
+  primaryNeedIdentity,
+  stableStringify,
+  uuidFromSeed,
+  validateNeedsPayload
+} = require("../lib/state-utils");
 
 const FEISHU_BASE_URL = process.env.FEISHU_BASE_URL || "https://open.feishu.cn";
 const FEISHU_APP_TOKEN = process.env.FEISHU_APP_TOKEN || process.env.FEISHU_BITABLE_APP_TOKEN || "Mg3abeaEya2QptsxOjIchxSLndd";
@@ -14,6 +25,7 @@ const ARRANGEMENT_HOTELS = ["诺富特", "宜必思", "施柏阁", "大观"];
 const IDENTITY_OPTIONS = ["工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"];
 const ROOM_TYPE_FIELDS = ["双标", "大床", "套房", "其他"];
 const LEGACY_SNAPSHOT_MAX_BYTES = 90 * 1024;
+const REQUEST_BODY_MAX_BYTES = 2 * 1024 * 1024;
 
 const sampleData = {
   hotels: [
@@ -32,7 +44,11 @@ const sampleData = {
 let tokenCache = { token: "", expiresAt: 0 };
 let tableIdCache = "";
 let readableTableCache = {};
+let readableSchemaReady = {};
 let coreTableCache = {};
+let coreSchemaReady = {};
+let mutationChain = Promise.resolve();
+let dailyBackupReadyDate = "";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -48,22 +64,25 @@ function retryableResponse(response, body) {
   return response.status === 429 || response.status >= 500 || /timeout|temporar|频率|限流|rate/i.test(message);
 }
 
-async function fetchJsonWithRetry(url, options = {}) {
+async function fetchJsonWithRetry(url, options = {}, retryOptions = {}) {
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const method = String(options.method || "GET").toUpperCase();
+  const safeToRetry = retryOptions.idempotent === true || ["GET", "HEAD", "PUT", "DELETE"].includes(method);
+  const attempts = safeToRetry ? 3 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       const body = await response.json().catch(() => ({}));
       clearTimeout(timer);
-      if (response.ok || !retryableResponse(response, body) || attempt === 2) {
+      if (response.ok || !retryableResponse(response, body) || attempt === attempts - 1) {
         return { response, body };
       }
     } catch (error) {
       clearTimeout(timer);
       lastError = error;
-      if (attempt === 2) throw error;
+      if (attempt === attempts - 1) throw error;
     }
     await sleep(retryDelay(attempt));
   }
@@ -73,6 +92,9 @@ async function fetchJsonWithRetry(url, options = {}) {
 function json(res, status, body) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
+  res.setHeader("cache-control", "private, no-store, max-age=0");
+  res.setHeader("pragma", "no-cache");
+  res.setHeader("x-content-type-options", "nosniff");
   res.setHeader("access-control-allow-origin", "*");
   res.setHeader("access-control-allow-methods", "GET,PUT,POST,OPTIONS");
   res.setHeader("access-control-allow-headers", "content-type");
@@ -80,11 +102,38 @@ function json(res, status, body) {
 }
 
 async function readJsonBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
+  if (req.body && typeof req.body === "object") {
+    if (Buffer.byteLength(JSON.stringify(req.body), "utf8") > REQUEST_BODY_MAX_BYTES) {
+      throw new ValidationError("请求数据过大，请拆分后重试。", 413, "REQUEST_TOO_LARGE");
+    }
+    return req.body;
+  }
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > REQUEST_BODY_MAX_BYTES) throw new ValidationError("请求数据过大，请拆分后重试。", 413, "REQUEST_TOO_LARGE");
+    chunks.push(chunk);
+  }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw new ValidationError("请求内容不是有效的 JSON。", 400, "INVALID_JSON");
+  }
+}
+
+function logEvent(level, event, details = {}) {
+  const payload = JSON.stringify({ timestamp: nowIso(), event, ...details });
+  if (level === "error") console.error(payload);
+  else if (level === "warn") console.warn(payload);
+  else console.info(payload);
+}
+
+function enqueueMutation(task) {
+  const queued = mutationChain.catch(() => {}).then(task);
+  mutationChain = queued.catch(() => {});
+  return queued;
 }
 
 async function tenantAccessToken() {
@@ -109,7 +158,7 @@ async function tenantAccessToken() {
   return tokenCache.token;
 }
 
-async function feishu(method, path, payload) {
+async function feishu(method, path, payload, options = {}) {
   const token = await tenantAccessToken();
   const { response, body } = await fetchJsonWithRetry(`${FEISHU_BASE_URL}${path}`, {
     method,
@@ -118,8 +167,13 @@ async function feishu(method, path, payload) {
       "content-type": "application/json; charset=utf-8"
     },
     body: payload ? JSON.stringify(payload) : undefined
-  });
+  }, options);
   if (!response.ok || body.code !== 0) {
+    if (Number(body.code) === 1254291 || /write conflict|写冲突|并发/i.test(String(body.msg || ""))) {
+      const conflict = new ValidationError("飞书检测到同时写入，请基于最新数据重试。", 409, "FEISHU_WRITE_CONFLICT");
+      conflict.stale = true;
+      throw conflict;
+    }
     throw new Error(`飞书接口失败：${body.msg || response.statusText}`);
   }
   return body.data || {};
@@ -175,12 +229,19 @@ async function allTables() {
 }
 
 async function ensureReadableTable(tableName, fields) {
-  if (readableTableCache[tableName]) return readableTableCache[tableName];
+  if (readableTableCache[tableName]) {
+    if (!readableSchemaReady[tableName]) {
+      await ensureReadableFields(readableTableCache[tableName], fields);
+      readableSchemaReady[tableName] = true;
+    }
+    return readableTableCache[tableName];
+  }
   const tables = await allTables();
   const existing = tables.find((table) => table.name === tableName);
   if (existing?.table_id) {
     readableTableCache[tableName] = existing.table_id;
     await ensureReadableFields(readableTableCache[tableName], fields);
+    readableSchemaReady[tableName] = true;
     return readableTableCache[tableName];
   }
 
@@ -188,34 +249,22 @@ async function ensureReadableTable(tableName, fields) {
     table: {
       name: tableName,
       default_view_name: "全部",
-      fields: fields.map((fieldName) => ({ field_name: fieldName, type: 1 }))
+      fields: fields.map(fieldDefinition)
     }
   });
   readableTableCache[tableName] = created.table?.table_id || created.table_id;
   if (!readableTableCache[tableName]) throw new Error(`飞书查看表 ${tableName} 创建成功但没有返回 table_id。`);
+  readableSchemaReady[tableName] = true;
   return readableTableCache[tableName];
 }
 
-async function ensureCoreTable(tableName, fields) {
-  if (coreTableCache[tableName]) return coreTableCache[tableName];
-  const tables = await allTables();
-  const existing = tables.find((table) => table.name === tableName);
-  if (existing?.table_id) {
-    coreTableCache[tableName] = existing.table_id;
-    await ensureReadableFields(coreTableCache[tableName], fields);
-    return coreTableCache[tableName];
-  }
-
-  const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables`, {
-    table: {
-      name: tableName,
-      default_view_name: "全部",
-      fields: fields.map((fieldName) => ({ field_name: fieldName, type: 1 }))
-    }
-  });
-  coreTableCache[tableName] = created.table?.table_id || created.table_id;
-  if (!coreTableCache[tableName]) throw new Error(`飞书核心表 ${tableName} 创建成功但没有返回 table_id。`);
-  return coreTableCache[tableName];
+function fieldDefinition(field) {
+  if (typeof field === "string") return { field_name: field, type: 1 };
+  return {
+    field_name: field.name,
+    type: field.type || 1,
+    ...(field.property ? { property: field.property } : {})
+  };
 }
 
 async function listFields(tableId) {
@@ -224,13 +273,16 @@ async function listFields(tableId) {
 
 async function ensureReadableFields(tableId, fields) {
   const existingFields = await listFields(tableId);
-  const existingNames = new Set(existingFields.map((field) => field.field_name));
-  for (const fieldName of fields) {
-    if (!existingNames.has(fieldName)) {
+  const existingByName = new Map(existingFields.map((field) => [field.field_name, field]));
+  for (const field of fields) {
+    const definition = fieldDefinition(field);
+    const existing = existingByName.get(definition.field_name);
+    if (!existing) {
       await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields`, {
-        field_name: fieldName,
-        type: 1
+        ...definition
       });
+    } else if (definition.type === 2 && existing.type !== 2 && existing.field_id) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/fields/${existing.field_id}`, definition);
     }
   }
 }
@@ -245,14 +297,23 @@ async function deleteObsoleteReadableTables() {
     try {
       await feishu("DELETE", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${table.table_id}`);
       delete readableTableCache[tableName];
+      delete readableSchemaReady[tableName];
     } catch {
       // 删除旧展示表失败不影响核心同步和新展示表刷新。
     }
   }
 }
 
-async function listRecords(tableId) {
-  return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records`, 500);
+async function listRecords(tableId, options = {}) {
+  const params = [];
+  if (options.filter) params.push(`filter=${encodeURIComponent(options.filter)}`);
+  if (options.sort) params.push(`sort=${encodeURIComponent(options.sort)}`);
+  const suffix = params.length ? `?${params.join("&")}` : "";
+  return feishuItems(`/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records${suffix}`, 500);
+}
+
+async function listActiveRecords(tableId) {
+  return listRecords(tableId, { filter: 'CurrentValue.[是否删除]!="是"' });
 }
 
 function chunkArray(items, size = 100) {
@@ -263,17 +324,32 @@ function chunkArray(items, size = 100) {
   return chunks;
 }
 
-async function batchCreateRecords(tableId, records) {
+async function batchCreateRecords(tableId, records, tokenSeed = crypto.randomUUID()) {
   const created = [];
-  for (const chunk of chunkArray(records, 100)) {
+  const chunks = chunkArray(records, 100);
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    const chunk = chunks[chunkIndex];
     if (!chunk.length) continue;
     try {
-      const data = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_create`, { records: chunk });
+      const clientToken = uuidFromSeed(`${tokenSeed}:${tableId}:batch-create:${chunkIndex}`);
+      const data = await feishu(
+        "POST",
+        `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_create?client_token=${clientToken}`,
+        { records: chunk },
+        { idempotent: true }
+      );
       created.push(...(data.records || []));
     } catch (error) {
       if (!canRetryBatchMethod(error)) throw error;
-      for (const record of chunk) {
-        const data = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records`, record);
+      for (let recordIndex = 0; recordIndex < chunk.length; recordIndex += 1) {
+        const record = chunk[recordIndex];
+        const clientToken = uuidFromSeed(`${tokenSeed}:${tableId}:create:${chunkIndex}:${recordIndex}`);
+        const data = await feishu(
+          "POST",
+          `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records?client_token=${clientToken}`,
+          record,
+          { idempotent: true }
+        );
         created.push(data.record || data);
       }
     }
@@ -289,11 +365,11 @@ async function batchUpdateRecords(tableId, records) {
   for (const chunk of chunkArray(records, 100)) {
     if (!chunk.length) continue;
     try {
-      await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_update`, { records: chunk });
+      await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_update`, { records: chunk }, { idempotent: true });
     } catch (error) {
       if (!canRetryBatchMethod(error)) throw error;
       try {
-        await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_update`, { records: chunk });
+        await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_update`, { records: chunk }, { idempotent: true });
       } catch (fallbackError) {
         if (!canRetryBatchMethod(fallbackError)) throw fallbackError;
         for (const record of chunk) {
@@ -308,7 +384,7 @@ async function batchDeleteRecords(tableId, recordIds) {
   for (const chunk of chunkArray(recordIds, 100)) {
     if (!chunk.length) continue;
     try {
-      await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_delete`, { records: chunk });
+      await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${tableId}/records/batch_delete`, { records: chunk }, { idempotent: true });
     } catch (error) {
       if (!canRetryBatchMethod(error)) throw error;
       for (const recordId of chunk) {
@@ -318,16 +394,50 @@ async function batchDeleteRecords(tableId, recordIds) {
   }
 }
 
-const NEED_FIELDS = ["需求ID", "入住日期", "离店日期", "安排酒店", "房间号", "房间类型", "备注", "上传批次", "上传时间", "创建时间", "更新时间", "是否删除"];
+const NEED_FIELDS = ["需求ID", "入住日期", "离店日期", "安排酒店", "房间号", "房间类型", "备注", "上传批次", "上传时间", "创建时间", "更新时间", "是否删除", "需求JSON", "数据校验"];
 const PERSON_FIELDS = ["人员ID", "需求ID", "顺序", "姓名", "性别", "电话", "身份证号", "人员性质", "是否主人员", "上传批次", "更新时间", "是否删除"];
-const OPERATION_FIELDS = ["操作ID", "操作时间", "操作类型", "需求ID", "上传批次", "影响条数", "操作人", "说明"];
-const BACKUP_FIELDS = ["备份ID", "备份类型", "备份日期", "备份时间", "关联操作", "上传批次", "需求数", "人数", "间夜", "JSON内容", "说明"];
+const OPERATION_FIELDS = ["操作ID", "操作时间", "操作类型", "需求ID", "上传批次", "影响条数", "操作人", "请求ID", "客户端ID", "结果", "说明"];
+const BACKUP_FIELDS = ["备份ID", "备份组ID", "备份类型", "备份日期", "备份时间", "关联操作", "上传批次", "需求数", "人数", "间夜", "分片序号", "分片总数", "数据格式", "数据校验", "原始字节数", "JSON内容", "说明"];
 
-async function ensureCoreTableIds() {
-  const needTableId = await ensureCoreTable(NEED_TABLE_NAME, NEED_FIELDS);
-  const personTableId = await ensureCoreTable(PERSON_TABLE_NAME, PERSON_FIELDS);
-  const operationTableId = await ensureCoreTable(OPERATION_TABLE_NAME, OPERATION_FIELDS);
-  const backupTableId = await ensureCoreTable(BACKUP_TABLE_NAME, BACKUP_FIELDS);
+async function ensureCoreTableFromKnownTables(tableName, fields, tables, ensureSchema) {
+  if (coreTableCache[tableName]) {
+    if (ensureSchema && !coreSchemaReady[tableName]) {
+      await ensureReadableFields(coreTableCache[tableName], fields);
+      coreSchemaReady[tableName] = true;
+    }
+    return coreTableCache[tableName];
+  }
+  const existing = tables.find((table) => table.name === tableName);
+  if (existing?.table_id) {
+    coreTableCache[tableName] = existing.table_id;
+    if (ensureSchema) {
+      await ensureReadableFields(coreTableCache[tableName], fields);
+      coreSchemaReady[tableName] = true;
+    }
+    return coreTableCache[tableName];
+  }
+  const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables`, {
+    table: {
+      name: tableName,
+      default_view_name: "全部",
+      fields: fields.map((fieldName) => ({ field_name: fieldName, type: 1 }))
+    }
+  });
+  coreTableCache[tableName] = created.table?.table_id || created.table_id;
+  if (!coreTableCache[tableName]) throw new Error(`飞书核心表 ${tableName} 创建成功但没有返回 table_id。`);
+  coreSchemaReady[tableName] = true;
+  return coreTableCache[tableName];
+}
+
+async function ensureCoreTableIds(options = {}) {
+  const ensureSchema = options.ensureSchema !== false;
+  const allCached = [NEED_TABLE_NAME, PERSON_TABLE_NAME, OPERATION_TABLE_NAME, BACKUP_TABLE_NAME]
+    .every((name) => coreTableCache[name]);
+  const tables = allCached ? [] : await allTables();
+  const needTableId = await ensureCoreTableFromKnownTables(NEED_TABLE_NAME, NEED_FIELDS, tables, ensureSchema);
+  const personTableId = await ensureCoreTableFromKnownTables(PERSON_TABLE_NAME, PERSON_FIELDS, tables, ensureSchema);
+  const operationTableId = await ensureCoreTableFromKnownTables(OPERATION_TABLE_NAME, OPERATION_FIELDS, tables, ensureSchema);
+  const backupTableId = await ensureCoreTableFromKnownTables(BACKUP_TABLE_NAME, BACKUP_FIELDS, tables, ensureSchema);
   return { needTableId, personTableId, operationTableId, backupTableId };
 }
 
@@ -413,17 +523,13 @@ function todayKey() {
 }
 
 function stateVersion(state) {
-  return crypto
-    .createHash("sha1")
-    .update(JSON.stringify({
-      needs: Array.isArray(state?.needs) ? state.needs : [],
-      eventDates: Array.isArray(state?.eventDates) ? state.eventDates : []
-    }))
-    .digest("hex");
+  return canonicalStateVersion(state);
 }
 
 function coreKeyMap(records, keyField) {
-  return new Map(records.map((record) => [String(record.fields?.[keyField] || ""), record]).filter(([key]) => key));
+  return new Map(activeUniqueRecords(records, keyField)
+    .map((record) => [String(record.fields?.[keyField] || ""), record])
+    .filter(([key]) => key));
 }
 
 function isDeletedRecord(record) {
@@ -473,8 +579,8 @@ async function deleteDuplicateActiveRecords(tableId, records, keyField) {
 
 async function cleanupDuplicateCoreRecords(tableIds) {
   const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
-  const needRecords = await listRecords(needTableId);
-  const personRecords = await listRecords(personTableId);
+  const needRecords = await listActiveRecords(needTableId);
+  const personRecords = await listActiveRecords(personTableId);
   const deletedNeeds = await deleteDuplicateActiveRecords(needTableId, needRecords, "需求ID");
   const deletedPeople = await deleteDuplicateActiveRecords(personTableId, personRecords, "人员ID");
   return { deletedNeeds, deletedPeople };
@@ -484,6 +590,7 @@ function needCoreFields(need, existingFields = {}) {
   const updatedAt = nowIso();
   const uploadBatch = need.uploadBatchId || need.uploadBatchName || existingFields["上传批次"] || "";
   const uploadTime = need.uploadBatchTime || existingFields["上传时间"] || "";
+  const needJson = stableStringify(need);
   return {
     "需求ID": need.id || "",
     "入住日期": need.checkIn || "",
@@ -496,7 +603,9 @@ function needCoreFields(need, existingFields = {}) {
     "上传时间": uploadTime,
     "创建时间": existingFields["创建时间"] || need.createdAt || updatedAt,
     "更新时间": updatedAt,
-    "是否删除": "否"
+    "是否删除": "否",
+    "需求JSON": needJson,
+    "数据校验": crypto.createHash("sha256").update(needJson).digest("hex")
   };
 }
 
@@ -519,8 +628,8 @@ function needPeopleRows(need) {
 
 async function readCoreWriteContext(tableIds) {
   const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
-  const needRecords = await listRecords(needTableId);
-  const personRecords = await listRecords(personTableId);
+  const needRecords = await listActiveRecords(needTableId);
+  const personRecords = await listActiveRecords(personTableId);
   const peopleByNeed = new Map();
   personRecords.forEach((record) => {
     const needId = String(record.fields?.["需求ID"] || "");
@@ -534,65 +643,87 @@ async function readCoreWriteContext(tableIds) {
   };
 }
 
-async function upsertNeedCore(need, tableIds, context = null) {
-  if (!need?.id) throw new Error("缺少需求ID，无法保存。");
+async function upsertNeedCore(need, tableIds, context = null, options = {}) {
+  const [validNeed] = validateNeedsPayload([need]);
   const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
   const writeContext = context || await readCoreWriteContext(tableIds);
-  const existingNeed = writeContext.needById.get(String(need.id));
-  const needFields = needCoreFields(need, existingNeed?.fields || {});
+  const existingNeed = writeContext.needById.get(String(validNeed.id));
+  const needFields = needCoreFields(validNeed, existingNeed?.fields || {});
   if (existingNeed?.record_id) {
     await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records/${existingNeed.record_id}`, { fields: needFields });
-    writeContext.needById.set(String(need.id), { ...existingNeed, fields: needFields });
+    writeContext.needById.set(String(validNeed.id), { ...existingNeed, fields: needFields });
   } else {
-    const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records`, { fields: needFields });
-    writeContext.needById.set(String(need.id), {
+    const clientToken = uuidFromSeed(`${options.operationId || validNeed.id}:need:create`);
+    const created = await feishu(
+      "POST",
+      `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records?client_token=${clientToken}`,
+      { fields: needFields },
+      { idempotent: true }
+    );
+    writeContext.needById.set(String(validNeed.id), {
       record_id: created.record?.record_id || created.record_id || "",
       fields: needFields
     });
   }
 
-  const personRows = needPeopleRows(need);
-  const existingPeople = writeContext.peopleByNeed.get(need.id) || [];
-  const existingPeopleById = coreKeyMap(existingPeople, "人员ID");
-  const incomingPersonIds = new Set(personRows.map((row) => row["人员ID"]));
-  for (const row of personRows) {
-    const existing = existingPeopleById.get(row["人员ID"]);
-    if (existing?.record_id) {
-      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${existing.record_id}`, { fields: row });
-      existing.fields = row;
-    } else {
-      const created = await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records`, { fields: row });
-      existingPeople.push({
-        record_id: created.record?.record_id || created.record_id || "",
-        fields: row
-      });
+  let personMirrorError = "";
+  try {
+    const personRows = needPeopleRows(validNeed);
+    const existingPeople = writeContext.peopleByNeed.get(validNeed.id) || [];
+    const existingPeopleById = coreKeyMap(existingPeople, "人员ID");
+    const incomingPersonIds = new Set(personRows.map((row) => row["人员ID"]));
+    for (let index = 0; index < personRows.length; index += 1) {
+      const row = personRows[index];
+      const existing = existingPeopleById.get(row["人员ID"]);
+      if (existing?.record_id) {
+        await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${existing.record_id}`, { fields: row });
+        existing.fields = row;
+      } else {
+        const clientToken = uuidFromSeed(`${options.operationId || validNeed.id}:person:create:${index}`);
+        const created = await feishu(
+          "POST",
+          `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records?client_token=${clientToken}`,
+          { fields: row },
+          { idempotent: true }
+        );
+        existingPeople.push({
+          record_id: created.record?.record_id || created.record_id || "",
+          fields: row
+        });
+      }
     }
-  }
 
-  for (const record of existingPeople) {
-    const personId = String(record.fields?.["人员ID"] || "");
-    if (personId && !incomingPersonIds.has(personId) && !isDeletedRecord(record)) {
-      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
-        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
-      });
-      record.fields = { ...record.fields, "更新时间": nowIso(), "是否删除": "是" };
+    for (const record of existingPeople) {
+      const personId = String(record.fields?.["人员ID"] || "");
+      if (personId && !incomingPersonIds.has(personId) && !isDeletedRecord(record)) {
+        await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
+          fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+        });
+        record.fields = { ...record.fields, "更新时间": nowIso(), "是否删除": "是" };
+      }
     }
+    writeContext.peopleByNeed.set(validNeed.id, existingPeople);
+  } catch (error) {
+    personMirrorError = error.message || "人员明细镜像同步失败";
+    logEvent("warn", "person_mirror_failed", { operationId: options.operationId || "", needId: validNeed.id, error: personMirrorError });
   }
-  writeContext.peopleByNeed.set(need.id, existingPeople);
+  return { savedNeeds: 1, savedPeople: peopleForNeed(validNeed).length, personMirrorError };
 }
 
-async function upsertNeedsCore(needs, tableIds, context = null) {
-  const validNeeds = (needs || []).filter((need) => need?.id);
+async function upsertNeedsCore(needs, tableIds, context = null, options = {}) {
+  const validNeeds = validateNeedsPayload(needs || []);
   if (!validNeeds.length) return { savedNeeds: 0, savedPeople: 0 };
   const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
   const writeContext = context || await readCoreWriteContext(tableIds);
   const needCreates = [];
   const needCreateIds = [];
   const needUpdates = [];
+  const expectedChecksums = new Map();
 
   for (const need of validNeeds) {
     const existingNeed = writeContext.needById.get(String(need.id));
     const fields = needCoreFields(need, existingNeed?.fields || {});
+    expectedChecksums.set(String(need.id), fields["数据校验"]);
     if (existingNeed?.record_id) {
       needUpdates.push({ record_id: existingNeed.record_id, fields });
       writeContext.needById.set(String(need.id), { ...existingNeed, fields });
@@ -603,7 +734,7 @@ async function upsertNeedsCore(needs, tableIds, context = null) {
   }
 
   await batchUpdateRecords(needTableId, needUpdates);
-  const createdNeeds = await batchCreateRecords(needTableId, needCreates);
+  const createdNeeds = await batchCreateRecords(needTableId, needCreates, `${options.operationId || "bulk"}:needs`);
   createdNeeds.forEach((record, index) => {
     const id = needCreateIds[index];
     if (!id) return;
@@ -612,6 +743,15 @@ async function upsertNeedsCore(needs, tableIds, context = null) {
       fields: record.fields || needCreates[index]?.fields || {}
     });
   });
+
+  const persistedNeeds = coreKeyMap(await listActiveRecords(needTableId), "需求ID");
+  const failedNeedIds = validNeeds.map((need) => String(need.id)).filter((id) => {
+    const record = persistedNeeds.get(id);
+    return !record || record.fields?.["数据校验"] !== expectedChecksums.get(id);
+  });
+  if (failedNeedIds.length) {
+    throw new Error(`核心需求保存校验失败，共 ${failedNeedIds.length} 条未完整写入，请使用同一批次重试。`);
+  }
 
   const personCreates = [];
   const personUpdates = [];
@@ -642,14 +782,48 @@ async function upsertNeedsCore(needs, tableIds, context = null) {
     }
   }
 
-  await batchUpdateRecords(personTableId, personUpdates);
-  await batchCreateRecords(personTableId, personCreates);
-  return { savedNeeds: validNeeds.length, savedPeople };
+  let personMirrorError = "";
+  try {
+    await batchUpdateRecords(personTableId, personUpdates);
+    await batchCreateRecords(personTableId, personCreates, `${options.operationId || "bulk"}:people`);
+  } catch (error) {
+    personMirrorError = error.message || "人员明细镜像同步失败";
+    logEvent("warn", "person_mirror_failed", { operationId: options.operationId || "", affectedNeeds: validNeeds.length, error: personMirrorError });
+  }
+  return { savedNeeds: validNeeds.length, savedPeople, personMirrorError };
+}
+
+async function repairPersonCoreMirror(state, tableIds, operationId = `REPAIR-${Date.now()}`) {
+  const validNeeds = validateNeedsPayload(state.needs || []);
+  const { personTableId } = tableIds || await ensureCoreTableIds();
+  const existingRecords = await listActiveRecords(personTableId);
+  const existingById = coreKeyMap(existingRecords, "人员ID");
+  const incomingRows = validNeeds.flatMap(needPeopleRows);
+  const incomingIds = new Set(incomingRows.map((row) => row["人员ID"]));
+  const updates = [];
+  const creates = [];
+  for (const row of incomingRows) {
+    const existing = existingById.get(row["人员ID"]);
+    if (existing?.record_id) updates.push({ record_id: existing.record_id, fields: row });
+    else creates.push({ fields: row });
+  }
+  for (const record of existingRecords) {
+    const personId = String(record.fields?.["人员ID"] || "");
+    if (personId && !incomingIds.has(personId)) {
+      updates.push({
+        record_id: record.record_id,
+        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+      });
+    }
+  }
+  await batchUpdateRecords(personTableId, updates);
+  await batchCreateRecords(personTableId, creates, `${operationId}:repair-people`);
+  return { updated: updates.length, created: creates.length };
 }
 
 async function deleteNeedCore(needId, tableIds) {
   const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
-  const needRecords = await listRecords(needTableId);
+  const needRecords = await listActiveRecords(needTableId);
   const needRecord = coreKeyMap(needRecords, "需求ID").get(String(needId || ""));
   if (needRecord?.record_id) {
     await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${needTableId}/records/${needRecord.record_id}`, {
@@ -657,19 +831,26 @@ async function deleteNeedCore(needId, tableIds) {
     });
   }
 
-  const personRecords = await listRecords(personTableId);
-  for (const record of personRecords.filter((item) => item.fields?.["需求ID"] === needId && !isDeletedRecord(item))) {
-    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
-      fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
-    });
+  let personMirrorError = "";
+  try {
+    const personRecords = await listActiveRecords(personTableId);
+    for (const record of personRecords.filter((item) => item.fields?.["需求ID"] === needId)) {
+      await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${personTableId}/records/${record.record_id}`, {
+        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+      });
+    }
+  } catch (error) {
+    personMirrorError = error.message || "人员明细镜像删除失败";
+    logEvent("warn", "person_mirror_delete_failed", { needId: needId || "", error: personMirrorError });
   }
+  return { deletedNeeds: needRecord?.record_id ? 1 : 0, personMirrorError };
 }
 
 async function deleteNeedsCore(needIds, tableIds) {
   const ids = new Set((needIds || []).map((id) => String(id || "")).filter(Boolean));
   if (!ids.size) return;
   const { needTableId, personTableId } = tableIds || await ensureCoreTableIds();
-  const needRecords = await listRecords(needTableId);
+  const needRecords = await listActiveRecords(needTableId);
   const needUpdates = [];
   for (const record of needRecords) {
     const needId = String(record.fields?.["需求ID"] || "");
@@ -681,25 +862,33 @@ async function deleteNeedsCore(needIds, tableIds) {
     }
   }
 
-  const personRecords = await listRecords(personTableId);
-  const personUpdates = [];
-  for (const record of personRecords) {
-    const needId = String(record.fields?.["需求ID"] || "");
-    if (ids.has(needId) && !isDeletedRecord(record)) {
-      personUpdates.push({
-        record_id: record.record_id,
-        fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
-      });
-    }
-  }
   await batchUpdateRecords(needTableId, needUpdates);
-  await batchUpdateRecords(personTableId, personUpdates);
+  let personMirrorError = "";
+  try {
+    const personRecords = await listActiveRecords(personTableId);
+    const personUpdates = [];
+    for (const record of personRecords) {
+      const needId = String(record.fields?.["需求ID"] || "");
+      if (ids.has(needId)) {
+        personUpdates.push({
+          record_id: record.record_id,
+          fields: { ...record.fields, "更新时间": nowIso(), "是否删除": "是" }
+        });
+      }
+    }
+    await batchUpdateRecords(personTableId, personUpdates);
+  } catch (error) {
+    personMirrorError = error.message || "人员明细镜像删除失败";
+    logEvent("warn", "person_mirror_delete_failed", { affectedNeeds: ids.size, error: personMirrorError });
+  }
+  return { deletedNeeds: needUpdates.length, personMirrorError };
 }
 
 async function recordOperation(type, needId, description, tableIds, options = {}) {
   const { operationTableId } = tableIds || await ensureCoreTableIds();
-  const id = `OP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${operationTableId}/records`, {
+  const id = options.operationId || `OP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const clientToken = uuidFromSeed(`${id}:operation-log`);
+  await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${operationTableId}/records?client_token=${clientToken}`, {
     fields: {
       "操作ID": id,
       "操作时间": nowIso(),
@@ -707,10 +896,13 @@ async function recordOperation(type, needId, description, tableIds, options = {}
       "需求ID": needId || "",
       "上传批次": options.batchId || "",
       "影响条数": String(options.count || ""),
-      "操作人": "网站",
+      "操作人": options.operator || "网站",
+      "请求ID": options.requestId || "",
+      "客户端ID": options.clientId || "",
+      "结果": options.result || "成功",
       "说明": description || ""
     }
-  });
+  }, { idempotent: true });
 }
 
 function stateSummary(state) {
@@ -741,12 +933,14 @@ function snapshotPayload(state) {
   };
 }
 
-function backupFields(state, options = {}) {
+function backupRows(state, options = {}) {
   const date = options.date || todayKey();
   const summary = stateSummary(state);
-  const snapshot = snapshotPayload(state);
-  return {
-    "备份ID": options.id || `BACKUP-${date}-${Date.now()}`,
+  const encoded = encodeStateBackup(state);
+  const groupId = options.id || `BACKUP-${date}-${Date.now()}`;
+  return encoded.chunks.map((chunk, index) => ({
+    "备份ID": `${groupId}#${String(index + 1).padStart(3, "0")}`,
+    "备份组ID": groupId,
     "备份类型": options.type || "每日备份",
     "备份日期": date,
     "备份时间": nowIso(),
@@ -755,56 +949,135 @@ function backupFields(state, options = {}) {
     "需求数": String(summary.needCount),
     "人数": String(summary.peopleCount),
     "间夜": String(summary.nightCount),
-    "JSON内容": snapshot.json,
-    "说明": [
-      options.reason || "网站自动备份",
-      snapshot.compact ? "明细数据量较大，已保存安全摘要，完整明细以核心表为准" : ""
-    ].filter(Boolean).join("；")
-  };
+    "分片序号": String(index + 1),
+    "分片总数": String(encoded.chunks.length),
+    "数据格式": encoded.format,
+    "数据校验": encoded.checksum,
+    "原始字节数": String(encoded.originalBytes),
+    "JSON内容": chunk,
+    "说明": options.reason || "网站自动完整备份"
+  }));
+}
+
+function backupStateFromRecords(records, backupId) {
+  const candidates = (records || []).filter((record) => {
+    const fields = record.fields || {};
+    return fields["备份组ID"] === backupId || fields["备份ID"] === backupId || String(fields["备份ID"] || "").startsWith(`${backupId}#`);
+  });
+  if (!candidates.length) throw new Error(`没有找到备份 ${backupId}。`);
+  const firstFields = candidates[0].fields || {};
+  if (!firstFields["数据格式"]) {
+    const raw = firstFields["JSON内容"] || "";
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || !Array.isArray(parsed.needs)) throw new Error("该旧备份只包含摘要，无法恢复完整数据。");
+    return parsed;
+  }
+  const sorted = candidates.sort((left, right) => Number(left.fields?.["分片序号"] || 0) - Number(right.fields?.["分片序号"] || 0));
+  const total = Number(firstFields["分片总数"] || 0);
+  if (!total || sorted.length !== total) throw new Error(`备份分片不完整，应有 ${total} 片，实际找到 ${sorted.length} 片。`);
+  return decodeStateBackup({
+    format: firstFields["数据格式"],
+    checksum: firstFields["数据校验"],
+    chunks: sorted.map((record) => record.fields?.["JSON内容"] || "")
+  });
+}
+
+async function writeBackupGroup(state, tableIds, options = {}) {
+  const { backupTableId } = tableIds || await ensureCoreTableIds();
+  const rows = backupRows(state, options);
+  const groupId = rows[0]["备份组ID"];
+  const existingRecords = options.replaceExisting ? await listRecords(backupTableId) : [];
+  const groupRecords = existingRecords.filter((record) => {
+    const fields = record.fields || {};
+    return fields["备份组ID"] === groupId || fields["备份ID"] === groupId || String(fields["备份ID"] || "").startsWith(`${groupId}#`);
+  });
+  const updates = [];
+  const creates = [];
+  rows.forEach((fields, index) => {
+    const existing = groupRecords[index];
+    if (existing?.record_id) updates.push({ record_id: existing.record_id, fields });
+    else creates.push({ fields });
+  });
+  await batchUpdateRecords(backupTableId, updates);
+  await batchCreateRecords(backupTableId, creates, `${groupId}:backup`);
+  const obsolete = groupRecords.slice(rows.length).map((record) => record.record_id).filter(Boolean);
+  await batchDeleteRecords(backupTableId, obsolete);
+  return { groupId, chunks: rows.length };
 }
 
 async function upsertDailyBackup(state, tableIds, reason = "网站自动每日备份") {
-  const { backupTableId } = tableIds || await ensureCoreTableIds();
   const date = todayKey();
-  const fields = backupFields(state, {
+  if (dailyBackupReadyDate === date) return { groupId: `DAILY-${date}`, skipped: true };
+  const ids = tableIds || await ensureCoreTableIds();
+  const existingRecords = await listRecords(ids.backupTableId);
+  const exists = existingRecords.some((record) => {
+    const fields = record.fields || {};
+    const sameGroup = fields["备份组ID"] === `DAILY-${date}` || fields["备份ID"] === `DAILY-${date}` || String(fields["备份ID"] || "").startsWith(`DAILY-${date}#`);
+    return sameGroup && fields["数据格式"] === "gzip-base64-v1";
+  });
+  if (exists) {
+    dailyBackupReadyDate = date;
+    return { groupId: `DAILY-${date}`, skipped: true };
+  }
+  const result = await writeBackupGroup(state, tableIds, {
     id: `DAILY-${date}`,
     type: "每日备份",
     date,
-    reason
+    reason,
+    replaceExisting: true
   });
-  const records = await listRecords(backupTableId);
-  const existing = records.find((record) => {
-    const fields = record.fields || {};
-    return fields["备份ID"] === `DAILY-${date}` || (!fields["备份ID"] && String(fields["备份日期"] || "") === date);
-  });
-  if (existing?.record_id) {
-    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records/${existing.record_id}`, { fields });
-  } else {
-    await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records`, { fields });
-    await recordOperation("每日备份", "", `${date} 已生成每日备份`, tableIds, { count: stateSummary(state).needCount });
-  }
+  dailyBackupReadyDate = date;
+  return result;
 }
 
 async function createOperationBackup(state, tableIds, options = {}) {
-  const { backupTableId } = tableIds || await ensureCoreTableIds();
   const date = todayKey();
-  const fields = backupFields(state, {
+  return writeBackupGroup(state, tableIds, {
     id: `BEFORE-${date}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     type: "操作前备份",
     date,
     operation: options.operation || "",
     batchId: options.batchId || "",
-    reason: options.reason || "高风险操作前自动备份"
+    reason: options.reason || "高风险操作前自动备份",
+    replaceExisting: false
   });
-  await feishu("POST", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${backupTableId}/records`, { fields });
 }
 
 async function tryDailyBackup(state, tableIds, reason) {
   try {
     await upsertDailyBackup(state, tableIds, reason);
-  } catch {
-    // 备份失败不阻断日常录入和同步，操作记录表里仍保留核心动作。
+  } catch (error) {
+    logEvent("error", "daily_backup_failed", { error: error.message || "未知错误" });
   }
+}
+
+async function readBackupState(backupId, tableIds = null) {
+  const ids = tableIds || await ensureCoreTableIds({ ensureSchema: false });
+  const records = await listRecords(ids.backupTableId);
+  return backupStateFromRecords(records, backupId);
+}
+
+async function restoreBackupById(backupId, options = {}) {
+  if (!backupId) throw new Error("缺少备份组ID。");
+  const tableIds = await ensureCoreTableIds();
+  const current = await readCoreState(tableIds);
+  const restoredState = await readBackupState(backupId, tableIds);
+  const restoredNeeds = validateNeedsPayload(restoredState.needs || []);
+  await createOperationBackup(current.state, tableIds, {
+    operation: "恢复备份",
+    reason: `恢复 ${backupId} 前自动备份`
+  });
+  const operationId = options.operationId || `RESTORE-${Date.now()}`;
+  await upsertNeedsCore(restoredNeeds, tableIds, null, { operationId });
+  const restoredIds = new Set(restoredNeeds.map((need) => need.id));
+  const obsoleteIds = (current.state.needs || []).map((need) => need.id).filter((id) => !restoredIds.has(id));
+  await deleteNeedsCore(obsoleteIds, tableIds);
+  await recordOperation("恢复备份", "", `已从 ${backupId} 恢复 ${restoredNeeds.length} 条需求`, tableIds, {
+    operationId,
+    count: restoredNeeds.length,
+    operator: options.operator || "本地恢复脚本"
+  });
+  return readCoreState(tableIds);
 }
 
 function stateFromCoreRecords(needRecords, personRecords) {
@@ -828,6 +1101,35 @@ function stateFromCoreRecords(needRecords, personRecords) {
 
   const needs = activeNeedRecords.map((record) => {
     const fields = record.fields || {};
+    const storedJson = fields["需求JSON"] || "";
+    if (storedJson) {
+      try {
+        const expectedChecksum = fields["数据校验"] || "";
+        const actualChecksum = crypto.createHash("sha256").update(storedJson).digest("hex");
+        if (expectedChecksum && expectedChecksum !== actualChecksum) throw new Error("需求JSON校验失败");
+        const storedNeed = JSON.parse(storedJson);
+        const companions = Array.isArray(storedNeed.companions) ? storedNeed.companions : [];
+        return {
+          ...storedNeed,
+          id: fields["需求ID"] || storedNeed.id || "",
+          companions,
+          people: Math.max(1, companions.length + 1),
+          adults: Math.max(1, companions.length + 1),
+          children: 0,
+          checkIn: fields["入住日期"] || storedNeed.checkIn || "",
+          checkOut: fields["离店日期"] || storedNeed.checkOut || "",
+          hotel: normalizedNeedHotel(fields["安排酒店"] || storedNeed.hotel),
+          roomNo: fields["房间号"] || storedNeed.roomNo || "",
+          roomType: fields["房间类型"] || storedNeed.roomType || "",
+          note: fields["备注"] || storedNeed.note || "",
+          uploadBatchId: fields["上传批次"] || storedNeed.uploadBatchId || "",
+          uploadBatchName: fields["上传批次"] || storedNeed.uploadBatchName || "",
+          uploadBatchTime: fields["上传时间"] || storedNeed.uploadBatchTime || ""
+        };
+      } catch (error) {
+        logEvent("warn", "need_json_invalid", { needId: fields["需求ID"] || "", error: error.message || "JSON解析失败" });
+      }
+    }
     const people = peopleByNeed.get(fields["需求ID"]) || [];
     const [mainPerson = {}, ...companions] = people;
     return {
@@ -868,9 +1170,9 @@ function stateFromCoreRecords(needRecords, personRecords) {
 }
 
 async function readCoreState(tableIds = null) {
-  const ids = tableIds || await ensureCoreTableIds();
-  const needRecords = await listRecords(ids.needTableId);
-  const personRecords = await listRecords(ids.personTableId);
+  const ids = tableIds || await ensureCoreTableIds({ ensureSchema: false });
+  const needRecords = await listActiveRecords(ids.needTableId);
+  const personRecords = await listActiveRecords(ids.personTableId);
   const state = stateFromCoreRecords(needRecords, personRecords);
   return { state, version: stateVersion(state), tableIds: ids, hasCoreRecords: needRecords.length > 0 };
 }
@@ -989,7 +1291,7 @@ function roleIdentities(state) {
 }
 
 function needMatchesIdentity(need, identity) {
-  return peopleForNeed(need).some((person) => personIdentity(person, need.identity) === identity);
+  return primaryNeedIdentity(need) === identity;
 }
 
 function needStaysOnDate(need, date) {
@@ -1012,21 +1314,21 @@ function statRow(key, date, hotel, identity, needs) {
     "日期": date,
     "酒店": hotel,
     "人员性质": identity,
-    "双标": String(counts["双标"]),
-    "大床": String(counts["大床"]),
-    "套房": String(counts["套房"]),
-    "其他": String(counts["其他"]),
-    "合计": String(total)
+    "双标": counts["双标"],
+    "大床": counts["大床"],
+    "套房": counts["套房"],
+    "其他": counts["其他"],
+    "合计": total
   };
 }
 
 function personListRows(state) {
   const rows = [];
-  let sequence = 1;
-  (state.needs || []).forEach((need) => {
-    peopleForNeed(need).forEach((person) => {
+  (state.needs || []).forEach((need, needIndex) => {
+    peopleForNeed(need).forEach((person, personIndex) => {
       rows.push({
-        "序号": String(sequence),
+        "名单键": `${need.id || needIndex + 1}｜${person.personId || personIndex + 1}`,
+        "序号": needIndex + 1,
         "姓名": person.name || "",
         "性别": person.gender || "",
         "电话": person.phone || "",
@@ -1034,14 +1336,13 @@ function personListRows(state) {
         "人员性质": personIdentity(person, need.identity),
         "入住日期": need.checkIn || "",
         "离店日期": need.checkOut || "",
-        "入住天数": String(stayDayCount(need)),
+        "入住天数": stayDayCount(need),
         "安排酒店": normalizedNeedHotel(need.hotel),
         "房间号": need.roomNo || "",
         "房间类型": need.roomType || "",
         "备注": need.note || "",
         "上传批次": need.uploadBatchId || need.uploadBatchName || ""
       });
-      sequence += 1;
     });
   });
   return rows;
@@ -1087,20 +1388,20 @@ function readableMirrorTables(state) {
   return [
     {
       name: "住宿人员名单",
-      keyField: "序号",
-      fields: ["序号", "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", "入住天数", "安排酒店", "房间号", "房间类型", "备注", "上传批次"],
+      keyField: "名单键",
+      fields: ["名单键", { name: "序号", type: 2, property: { formatter: "0" } }, "姓名", "性别", "电话", "身份证号", "人员性质", "入住日期", "离店日期", { name: "入住天数", type: 2, property: { formatter: "0" } }, "安排酒店", "房间号", "房间类型", "备注", "上传批次"],
       rows: personListRows(state)
     },
     {
       name: "酒店统计查看",
       keyField: "统计维度",
-      fields: ["统计维度", "日期", "酒店", "人员性质", "双标", "大床", "套房", "其他", "合计"],
+      fields: ["统计维度", "日期", "酒店", "人员性质", ...["双标", "大床", "套房", "其他", "合计"].map((name) => ({ name, type: 2, property: { formatter: "0" } }))],
       rows: hotelStatRows(state)
     },
     {
       name: "角色统计查看",
       keyField: "统计维度",
-      fields: ["统计维度", "日期", "人员性质", "酒店", "双标", "大床", "套房", "其他", "合计"],
+      fields: ["统计维度", "日期", "人员性质", "酒店", ...["双标", "大床", "套房", "其他", "合计"].map((name) => ({ name, type: 2, property: { formatter: "0" } }))],
       rows: roleStatRows(state).map((row) => ({
         "统计维度": row["统计维度"],
         "日期": row["日期"],
@@ -1125,165 +1426,291 @@ async function syncReadableMirrorTables(state) {
 }
 
 function shouldCheckStateVersion(body) {
-  return Boolean(body?.baseVersion) && ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds"].includes(body?.action);
+  return ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds", "cleanupDuplicates"].includes(body?.action) || Boolean(body?.state);
 }
 
 function shouldCreateOperationBackup(body) {
-  return ["upsertNeeds", "deleteNeed", "deleteNeeds"].includes(body?.action);
+  return ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds", "cleanupDuplicates"].includes(body?.action) || Boolean(body?.state);
+}
+
+function mutationAlreadyApplied(body, state) {
+  const currentNeeds = new Map((state.needs || []).map((need) => [need.id, need]));
+  if (body?.action === "upsertNeed") {
+    const current = currentNeeds.get(body.need?.id);
+    return Boolean(current && needsEqual(current, body.need));
+  }
+  if (body?.action === "upsertNeeds") {
+    return Array.isArray(body.needs) && body.needs.every((need) => {
+      const current = currentNeeds.get(need.id);
+      return Boolean(current && needsEqual(current, need));
+    });
+  }
+  if (body?.action === "deleteNeed") return !currentNeeds.has(body.needId);
+  if (body?.action === "deleteNeeds") return Array.isArray(body.needIds) && body.needIds.every((id) => !currentNeeds.has(id));
+  if (body?.state && typeof body.state === "object") {
+    const incoming = Array.isArray(body.state.needs) ? body.state.needs : [];
+    return incoming.length === currentNeeds.size && incoming.every((need) => {
+      const current = currentNeeds.get(need.id);
+      return Boolean(current && needsEqual(current, need));
+    });
+  }
+  return false;
+}
+
+function validateMutationBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("请求数据格式无效。");
+  const normalized = { ...body };
+  normalized.operationId = String(body.operationId || crypto.randomUUID()).slice(0, 120);
+  normalized.clientId = String(body.clientId || "").slice(0, 120);
+  normalized.operator = String(body.operator || "").slice(0, 80);
+  if (body.action === "upsertNeed") {
+    normalized.need = validateNeedsPayload([body.need])[0];
+  } else if (body.action === "upsertNeeds") {
+    normalized.needs = validateNeedsPayload(body.needs || []);
+  } else if (body.action === "deleteNeed") {
+    normalized.needId = String(body.needId || "").trim().slice(0, 120);
+    if (!normalized.needId) throw new ValidationError("缺少需要删除的需求ID。");
+  } else if (body.action === "deleteNeeds") {
+    if (!Array.isArray(body.needIds) || body.needIds.length > 1000) throw new ValidationError("批量删除列表无效或超过 1000 条。", 413);
+    normalized.needIds = Array.from(new Set(body.needIds.map((id) => String(id || "").trim()).filter(Boolean)));
+  } else if (["cleanupDuplicates", "refreshViews"].includes(body.action)) {
+    // 维护动作没有业务数据负载。
+  } else if (body.state && typeof body.state === "object") {
+    normalized.state = { ...body.state, needs: validateNeedsPayload(body.state.needs || []) };
+  } else {
+    throw new ValidationError("缺少可保存的数据。");
+  }
+  return normalized;
+}
+
+function operationLogOptions(body, requestId, count) {
+  return {
+    operationId: body.operationId,
+    batchId: body.batchId || "",
+    count,
+    operator: body.operator || "网站",
+    requestId,
+    clientId: body.clientId || "",
+    result: "成功"
+  };
+}
+
+async function processMutation(body, requestId) {
+  const tableIds = await ensureCoreTableIds();
+  const deferMirror = body.deferMirror === true;
+  const shouldSyncReadableViews = body.action === "refreshViews";
+  let cleanupResult = null;
+  let personMirrorError = "";
+  let operationLogError = "";
+  let beforeWrite = null;
+  const readBeforeWrite = async () => {
+    if (!beforeWrite) beforeWrite = await readCoreState(tableIds);
+    return beforeWrite;
+  };
+
+  if (shouldCheckStateVersion(body)) {
+    const current = await readBeforeWrite();
+    if (!body.baseVersion) {
+      return { status: 428, body: { ok: false, stale: true, error: "缺少数据版本，请刷新后重新操作。", state: current.state, version: current.version } };
+    }
+    if (current.version !== body.baseVersion) {
+      if (mutationAlreadyApplied(body, current.state)) {
+        return { status: 200, body: { ok: true, replayed: true, state: current.state, version: current.version, source: "core_tables" } };
+      }
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          stale: true,
+          error: "共享数据已被其他人更新。你的修改已保留，请选择继续保存或采用线上数据。",
+          state: current.state,
+          version: current.version,
+          source: "core_tables"
+        }
+      };
+    }
+  }
+
+  if (shouldCreateOperationBackup(body)) {
+    const current = await readBeforeWrite();
+    await createOperationBackup(current.state, tableIds, {
+      operation: body.operationType || body.action || "",
+      batchId: body.batchId || "",
+      reason: body.operationDescription || "数据修改前自动完整备份"
+    });
+    const latest = await readCoreState(tableIds);
+    if (shouldCheckStateVersion(body) && latest.version !== body.baseVersion) {
+      if (mutationAlreadyApplied(body, latest.state)) {
+        return { status: 200, body: { ok: true, replayed: true, state: latest.state, version: latest.version, source: "core_tables" } };
+      }
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          stale: true,
+          error: "备份期间共享数据发生了变化。你的修改已保留，请确认后重试。",
+          state: latest.state,
+          version: latest.version,
+          source: "core_tables"
+        }
+      };
+    }
+  }
+
+  let logArgs = null;
+  if (body.action === "upsertNeed") {
+    const result = await upsertNeedCore(body.need, tableIds, null, { operationId: body.operationId });
+    personMirrorError = result.personMirrorError || "";
+    logArgs = [body.operationType || "保存需求", body.need.id, body.operationDescription || "网站保存单条入住需求", 1];
+  } else if (body.action === "upsertNeeds") {
+    const uploadTime = body.uploadBatchTime || nowIso();
+    const needsWithBatch = body.needs.map((need) => ({
+      ...need,
+      uploadBatchId: need.uploadBatchId || body.batchId || "",
+      uploadBatchName: need.uploadBatchName || body.batchName || body.batchId || "",
+      uploadBatchTime: need.uploadBatchTime || uploadTime
+    }));
+    const result = await upsertNeedsCore(needsWithBatch, tableIds, null, { operationId: body.operationId });
+    personMirrorError = result.personMirrorError || "";
+    logArgs = [
+      body.operationType || "批量保存需求",
+      "",
+      body.operationDescription || `网站批量保存 ${result.savedNeeds} 条入住需求，${result.savedPeople} 人`,
+      result.savedNeeds
+    ];
+  } else if (body.action === "deleteNeed") {
+    const result = await deleteNeedCore(body.needId, tableIds);
+    personMirrorError = result.personMirrorError || "";
+    logArgs = [body.operationType || "删除需求", body.needId, body.operationDescription || "网站删除入住需求", 1];
+  } else if (body.action === "deleteNeeds") {
+    const result = await deleteNeedsCore(body.needIds, tableIds);
+    personMirrorError = result.personMirrorError || "";
+    logArgs = [body.operationType || "批量删除需求", "", body.operationDescription || `网站批量删除 ${body.needIds.length} 条入住需求`, body.needIds.length];
+  } else if (body.action === "cleanupDuplicates") {
+    cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
+    logArgs = ["清理重复", "", `清理重复需求 ${cleanupResult.deletedNeeds} 条、重复人员 ${cleanupResult.deletedPeople} 条`, cleanupResult.deletedNeeds + cleanupResult.deletedPeople];
+  } else if (body.action === "refreshViews") {
+    const current = await readBeforeWrite();
+    const repair = await repairPersonCoreMirror(current.state, tableIds, body.operationId);
+    logArgs = ["刷新展示", "", `网站刷新住宿展示数据，并修复人员明细：更新 ${repair.updated} 条、新增 ${repair.created} 条`, repair.updated + repair.created];
+  } else if (body.state && typeof body.state === "object") {
+    const current = await readBeforeWrite();
+    const needs = body.state.needs || [];
+    const result = await upsertNeedsCore(needs, tableIds, null, { operationId: body.operationId });
+    personMirrorError = result.personMirrorError || "";
+    const incomingIds = new Set(needs.map((need) => need.id));
+    const obsoleteIds = (current.state.needs || []).map((need) => need.id).filter((id) => !incomingIds.has(id));
+    if (obsoleteIds.length) await deleteNeedsCore(obsoleteIds, tableIds);
+    logArgs = ["兼容保存", "", `兼容旧接口保存 ${needs.length} 条入住需求`, needs.length];
+  }
+
+  if (logArgs && (!deferMirror || body.operationType)) {
+    try {
+      await recordOperation(logArgs[0], logArgs[1], logArgs[2], tableIds, operationLogOptions(body, requestId, logArgs[3]));
+    } catch (error) {
+      operationLogError = error.message || "操作日志写入失败";
+      logEvent("error", "operation_log_failed", { requestId, operationId: body.operationId, error: operationLogError });
+    }
+  }
+
+  const { state, version } = await readCoreState(tableIds);
+  if (shouldCreateOperationBackup(body)) await tryDailyBackup(state, tableIds, "当日首次修改后完整备份");
+  let mirrorError = "";
+  let legacySnapshotWarning = "";
+  if (shouldSyncReadableViews) {
+    try {
+      await syncReadableMirrorTables(state);
+    } catch (error) {
+      mirrorError = error.message || "飞书查看表同步失败";
+    }
+    legacySnapshotWarning = await tryRefreshLegacySnapshot(state);
+  }
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      state,
+      version,
+      source: "core_tables",
+      deferred: deferMirror,
+      mirrorError,
+      personMirrorError,
+      operationLogError,
+      cleanup: cleanupResult,
+      legacySnapshotWarning
+    }
+  };
 }
 
 async function handler(req, res) {
-  if (req.method === "OPTIONS") return json(res, 200, { ok: true });
-  if (!["GET", "PUT", "POST"].includes(req.method)) return json(res, 405, { ok: false, error: "Method not allowed" });
+  const requestId = crypto.randomUUID();
+  const startedAt = Date.now();
+  let requestAction = "";
+  const respond = (status, body) => {
+    logEvent(status >= 500 ? "error" : status >= 400 ? "warn" : "info", "api_request", {
+      requestId,
+      method: req.method,
+      action: requestAction,
+      status,
+      durationMs: Date.now() - startedAt,
+      error: status >= 400 ? body?.error || "" : ""
+    });
+    return json(res, status, { ...body, requestId });
+  };
+
+  if (req.method === "OPTIONS") return respond(200, { ok: true });
+  if (!["GET", "PUT", "POST"].includes(req.method)) return respond(405, { ok: false, error: "Method not allowed" });
 
   try {
     if (req.method === "GET") {
       const state = await migrateLegacyStateIfNeeded();
-      await tryDailyBackup(state, null, "打开网站时自动备份");
-      return json(res, 200, { ok: true, state, version: stateVersion(state), source: "core_tables" });
+      return respond(200, { ok: true, state, version: stateVersion(state), source: "core_tables" });
     }
 
-    const body = await readJsonBody(req);
-    const tableIds = await ensureCoreTableIds();
-    const deferMirror = body?.deferMirror === true;
-    const shouldSyncReadableViews = body?.action === "refreshViews";
-    let cleanupResult = null;
-    let legacySnapshotWarning = "";
-    let beforeWrite = null;
-    const readBeforeWrite = async () => {
-      if (!beforeWrite) beforeWrite = await readCoreState(tableIds);
-      return beforeWrite;
-    };
-
-    if (shouldCheckStateVersion(body)) {
-      const current = await readBeforeWrite();
-      if (current.version !== body.baseVersion) {
-        return json(res, 409, {
+    const body = validateMutationBody(await readJsonBody(req));
+    requestAction = body.action || (body.state ? "legacyStateSave" : "");
+    const result = await enqueueMutation(() => processMutation(body, requestId));
+    return respond(result.status, result.body);
+  } catch (error) {
+    const status = Number(error.status) || 500;
+    logEvent("error", "api_failure", {
+      requestId,
+      method: req.method,
+      status,
+      code: error.code || "UNEXPECTED_ERROR",
+      error: error.message || "同步失败",
+      stack: status >= 500 ? String(error.stack || "").slice(0, 2000) : ""
+    });
+    if (status === 409 && error.stale) {
+      try {
+        const current = await readCoreState();
+        return respond(409, {
           ok: false,
           stale: true,
-          error: "共享数据已被其他人更新。为避免覆盖，请刷新后再操作。",
+          error: error.message || "检测到同时写入，请重试。",
+          code: error.code || "FEISHU_WRITE_CONFLICT",
           state: current.state,
           version: current.version,
           source: "core_tables"
         });
+      } catch (readError) {
+        logEvent("error", "conflict_state_read_failed", { requestId, error: readError.message || "读取失败" });
       }
     }
-
-    if (shouldCreateOperationBackup(body)) {
-      const current = await readBeforeWrite();
-      await createOperationBackup(current.state, tableIds, {
-        operation: body.operationType || body.action || "",
-        batchId: body.batchId || "",
-        reason: body.operationDescription || "高风险操作前自动备份"
-      });
-    }
-
-    if (body?.action === "upsertNeed") {
-      await upsertNeedCore(body.need, tableIds);
-      if (!deferMirror) {
-        await recordOperation(
-          body.operationType || "保存需求",
-          body.need?.id || "",
-          body.operationDescription || "网站保存单条入住需求",
-          tableIds,
-          { batchId: body.batchId || body.need?.uploadBatchId || "", count: 1 }
-        );
-      }
-    } else if (body?.action === "upsertNeeds") {
-      const needs = Array.isArray(body.needs) ? body.needs : [];
-      const uploadTime = body.uploadBatchTime || nowIso();
-      const needsWithBatch = needs.map((need) => ({
-        ...need,
-        uploadBatchId: need.uploadBatchId || body.batchId || "",
-        uploadBatchName: need.uploadBatchName || body.batchName || body.batchId || "",
-        uploadBatchTime: need.uploadBatchTime || uploadTime
-      }));
-      const result = await upsertNeedsCore(needsWithBatch, tableIds);
-      if (deferMirror) {
-        if (body.operationType) {
-          await recordOperation(
-            body.operationType,
-            "",
-            body.operationDescription || `网站批量保存 ${result.savedNeeds} 条入住需求，${result.savedPeople} 人`,
-            tableIds,
-            { batchId: body.batchId || "", count: result.savedNeeds }
-          );
-        }
-        return json(res, 200, { ok: true, savedCount: result.savedNeeds, savedPeople: result.savedPeople, deferred: true });
-      }
-      await recordOperation(
-        body.operationType || "批量保存需求",
-        "",
-        body.operationDescription || `网站批量保存 ${result.savedNeeds} 条入住需求，${result.savedPeople} 人`,
-        tableIds,
-        { batchId: body.batchId || "", count: result.savedNeeds }
-      );
-    } else if (body?.action === "deleteNeed") {
-      await deleteNeedCore(body.needId, tableIds);
-      if (!deferMirror) {
-        await recordOperation(
-          body.operationType || "删除需求",
-          body.needId || "",
-          body.operationDescription || "网站删除入住需求",
-          tableIds,
-          { batchId: body.batchId || "", count: 1 }
-        );
-      }
-    } else if (body?.action === "deleteNeeds") {
-      const needIds = Array.isArray(body.needIds) ? body.needIds : [];
-      await deleteNeedsCore(needIds, tableIds);
-      if (deferMirror) {
-        if (body.operationType) {
-          await recordOperation(
-            body.operationType,
-            "",
-            body.operationDescription || `网站批量删除 ${needIds.length} 条入住需求`,
-            tableIds,
-            { batchId: body.batchId || "", count: needIds.length }
-          );
-        }
-        return json(res, 200, { ok: true, deletedCount: needIds.length, deferred: true });
-      }
-      await recordOperation(
-        body.operationType || "批量删除需求",
-        "",
-        body.operationDescription || `网站批量删除 ${needIds.length} 条入住需求`,
-        tableIds,
-        { batchId: body.batchId || "", count: needIds.length }
-      );
-    } else if (body?.action === "cleanupDuplicates") {
-      cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
-      const { state, version } = await readCoreState(tableIds);
-      legacySnapshotWarning = await tryRefreshLegacySnapshot(state);
-      await tryDailyBackup(state, tableIds, "清理重复数据后自动备份");
-      return json(res, 200, { ok: true, state, version, source: "core_tables", cleanup: cleanupResult, legacySnapshotWarning });
-    } else if (body?.action === "refreshViews") {
-      cleanupResult = await cleanupDuplicateCoreRecords(tableIds);
-      await recordOperation("刷新展示", "", "网站刷新住宿展示数据", tableIds);
-    } else if (body?.state && typeof body.state === "object") {
-      const needs = Array.isArray(body.state.needs) ? body.state.needs : [];
-      await upsertNeedsCore(needs, tableIds);
-      await recordOperation("兼容保存", "", `兼容旧接口保存 ${needs.length} 条入住需求`, tableIds);
-    } else {
-      return json(res, 400, { ok: false, error: "缺少可保存的数据。" });
-    }
-
-    const { state, version } = await readCoreState(tableIds);
-    legacySnapshotWarning = await tryRefreshLegacySnapshot(state);
-    await tryDailyBackup(state, tableIds, "保存数据后自动备份");
-    let mirrorError = "";
-    if (shouldSyncReadableViews) {
-      try {
-        await syncReadableMirrorTables(state);
-      } catch (error) {
-        mirrorError = error.message || "飞书查看表同步失败";
-      }
-    }
-    return json(res, 200, { ok: true, state, version, source: "core_tables", mirrorError, cleanup: cleanupResult, legacySnapshotWarning });
-  } catch (error) {
-    return json(res, 500, { ok: false, error: error.message || "同步失败" });
+    return respond(status, { ok: false, error: error.message || "同步失败", code: error.code || "UNEXPECTED_ERROR" });
   }
 }
 
 module.exports = handler;
 module.exports.config = { maxDuration: 60 };
+module.exports._internal = {
+  backupRows,
+  backupStateFromRecords,
+  mutationAlreadyApplied,
+  personListRows,
+  readableMirrorTables,
+  restoreBackupById,
+  stateFromCoreRecords,
+  stateVersion,
+  validateMutationBody
+};

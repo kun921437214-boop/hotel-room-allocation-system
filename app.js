@@ -2,6 +2,7 @@ const storageKey = "hotelRoomOpsLocalSystem.v5.roomAvailability";
 const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
 const workbookExportApiUrl = window.HOTEL_ROOM_WORKBOOK_EXPORT_API || "/api/export-workbook";
 const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
+const clientIdStorageKey = `${storageKey}.clientId`;
 
 const sampleData = {
   hotels: [
@@ -30,6 +31,32 @@ let localStateRevision = 0;
 let needsRemoteSaveAfterLoad = false;
 let uploadInProgress = false;
 let remoteStateVersion = "";
+
+function randomOperationId(prefix = "OP") {
+  const value = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${value}`;
+}
+
+function browserClientId() {
+  let value = localStorage.getItem(clientIdStorageKey);
+  if (!value) {
+    value = randomOperationId("CLIENT");
+    localStorage.setItem(clientIdStorageKey, value);
+  }
+  return value;
+}
+
+const clientId = browserClientId();
+
+function remotePayload(payload, baseVersion = remoteStateVersion) {
+  return {
+    ...payload,
+    operationId: payload.operationId || randomOperationId(),
+    clientId,
+    operator: payload.operator || `设备-${clientId.slice(-8)}`,
+    baseVersion
+  };
+}
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -136,10 +163,48 @@ function applyRemoteResult(result, shouldRender = true) {
 }
 
 function handleStaleRemoteResult(result) {
-  applyRemoteResult(result, true);
+  if (result?.version) remoteStateVersion = result.version;
   remoteSyncReady = true;
   saveQueued = false;
-  setSyncStatus("共享数据已更新，请重新操作", "bad");
+  setSyncStatus("检测到修改冲突，本机修改已保留", "bad");
+}
+
+async function resolveStaleRemoteResult(payload, result) {
+  handleStaleRemoteResult(result);
+  const action = await showUploadDialog({
+    title: "检测到同时修改",
+    message: "其他同事已经更新了共享数据。你刚才的修改仍保留在本机，可以基于最新版本继续保存，或采用线上数据。",
+    primaryText: "继续保存我的修改",
+    secondaryText: "采用线上数据"
+  });
+  if (action === "primary") return true;
+  applyRemoteResult(result, true);
+  setSyncStatus("已采用线上数据", "ok");
+  return false;
+}
+
+async function sendRemoteMutation(payload) {
+  const stablePayload = remotePayload(payload);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(syncApiUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ ...stablePayload, baseVersion: remoteStateVersion })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.status === 409 && result?.stale) {
+      const retry = await resolveStaleRemoteResult(stablePayload, result);
+      if (retry) continue;
+      return { discarded: true, result };
+    }
+    if (response.status === 428 && result?.stale) {
+      handleStaleRemoteResult(result);
+      if (attempt < 2) continue;
+    }
+    if (!response.ok || result?.ok === false) throw new Error(result?.error || `HTTP ${response.status}`);
+    return { discarded: false, result };
+  }
+  throw new Error("共享数据持续发生冲突，请稍后再试。");
 }
 
 function scheduleRemoteSave() {
@@ -157,23 +222,19 @@ async function syncStateToRemote() {
   saveInFlight = true;
   setSyncStatus("正在保存共享数据");
   try {
-    const response = await fetch(syncApiUrl, {
-      method: "PUT",
-      headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ state, baseVersion: remoteStateVersion })
-    });
-    const result = await response.json().catch(() => ({}));
-    if (response.status === 409 && result?.stale) {
-      handleStaleRemoteResult(result);
-      return;
-    }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const sent = await sendRemoteMutation({ state, operationId: randomOperationId("STATE") });
+    if (sent.discarded) return;
+    const result = sent.result;
     if (result?.version) remoteStateVersion = result.version;
     if (result?.state && startedAtRevision === localStateRevision) {
       applyRemoteResult(result, true);
     }
     remoteSyncReady = true;
-    setSyncStatus("共享数据已保存", "ok");
+    if (result?.personMirrorError || result?.operationLogError) {
+      setSyncStatus("主数据已保存，飞书明细待修复", "bad");
+    } else {
+      setSyncStatus("共享数据已保存", "ok");
+    }
   } catch (error) {
     remoteSyncReady = false;
     setSyncStatus("保存失败，已保存在本机", "bad");
@@ -188,11 +249,12 @@ async function syncStateToRemote() {
 
 function queueRemoteOperation(payload) {
   if (!remoteSyncReady) return;
+  const queuedPayload = { ...payload, operationId: payload.operationId || randomOperationId("MUTATION") };
   remoteOperationPending += 1;
   setSyncStatus("正在保存共享数据");
   remoteOperationChain = remoteOperationChain
     .catch(() => {})
-    .then(() => syncOperationToRemote(payload))
+    .then(() => syncOperationToRemote(queuedPayload))
     .finally(() => {
       remoteOperationPending = Math.max(0, remoteOperationPending - 1);
     });
@@ -201,23 +263,19 @@ function queueRemoteOperation(payload) {
 async function syncOperationToRemote(payload) {
   if (!remoteSyncReady) return;
   try {
-    const response = await fetch(syncApiUrl, {
-      method: "PUT",
-      headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ ...payload, baseVersion: remoteStateVersion })
-    });
-    const result = await response.json().catch(() => ({}));
-    if (response.status === 409 && result?.stale) {
-      handleStaleRemoteResult(result);
-      return;
-    }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const sent = await sendRemoteMutation(payload);
+    if (sent.discarded) return;
+    const result = sent.result;
     if (result?.version) remoteStateVersion = result.version;
     if (result?.state && remoteOperationPending <= 1) {
       applyRemoteResult(result, true);
     }
     remoteSyncReady = true;
-    setSyncStatus("共享数据已保存", "ok");
+    if (result?.personMirrorError || result?.operationLogError) {
+      setSyncStatus("主数据已保存，飞书明细待修复", "bad");
+    } else {
+      setSyncStatus("共享数据已保存", "ok");
+    }
   } catch (error) {
     remoteSyncReady = false;
     setSyncStatus("保存失败，已保存在本机", "bad");
@@ -404,16 +462,16 @@ function showUploadDialog({ title, message, meta = "", primaryText = "继续上�
 }
 
 async function syncUploadPayload(payload) {
-  const shouldCheckVersion = payload.action === "upsertNeeds";
+  const requestPayload = remotePayload(payload);
   const response = await fetch(syncApiUrl, {
     method: "PUT",
     headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify(shouldCheckVersion ? { ...payload, baseVersion: remoteStateVersion } : payload)
+    body: JSON.stringify(requestPayload)
   });
   const result = await response.json().catch(() => ({}));
-  if (response.status === 409 && result?.stale) {
+  if ([409, 428].includes(response.status) && result?.stale) {
     handleStaleRemoteResult(result);
-    throw new Error("共享数据已被其他人更新，请重新选择文件上传。");
+    throw new Error("共享数据版本已更新，可以直接继续本次上传。");
   }
   if (!response.ok || result?.ok === false) {
     throw new Error(result?.error || `HTTP ${response.status}`);
@@ -447,6 +505,7 @@ async function uploadNeedTaskOnce(task) {
   setSyncStatus("正在批量保存共享数据");
   const result = await syncUploadPayload({
     action: "upsertNeeds",
+    operationId: task.id,
     needs: task.needs,
     batchId: task.id,
     batchName: task.batchName,
@@ -463,6 +522,9 @@ async function uploadNeedTaskOnce(task) {
   clearPendingUploadTask();
   render();
   setUploadProgress(`完成 ${task.total} / ${task.total}`, "done");
+  if (result?.personMirrorError || result?.operationLogError) {
+    setSyncStatus("主数据已保存，飞书明细待修复", "bad");
+  }
   setTimeout(() => {
     if (!loadPendingUploadTask()) setUploadProgress("");
   }, 2500);
@@ -475,6 +537,7 @@ async function rollbackUploadTask(task) {
   setUploadProgress(`正在取消 ${ids.length} / ${ids.length}`);
   const result = await syncUploadPayload({
     action: "deleteNeeds",
+    operationId: `ROLLBACK-${task.id}`,
     needIds: ids,
     batchId: task.id,
     operationType: "撤回上传批次",
@@ -626,6 +689,10 @@ function needMatchesIdentity(need, identity = "all") {
   return identity === "all" || peopleForNeed(need).some((person) => personIdentity(person, need.identity) === identity);
 }
 
+function needMatchesRoomIdentity(need, identity = "all") {
+  return identity === "all" || personIdentity(need, need.identity) === identity;
+}
+
 function needMatchesHotel(need, hotel = "all") {
   return hotel === "all" || normalizedNeedHotel(need.hotel) === hotel;
 }
@@ -637,7 +704,7 @@ function needStaysOnDate(date, hotel = "all", identity = "all") {
     date >= need.checkIn &&
     date < need.checkOut &&
     needMatchesHotel(need, hotel) &&
-    needMatchesIdentity(need, identity) &&
+    needMatchesRoomIdentity(need, identity) &&
     filteredText(need).includes(getSearch())
   ));
 }
@@ -648,7 +715,7 @@ function roleNeedsOnDate(date, identity = "all", hotel = "all") {
     need.checkOut &&
     date >= need.checkIn &&
     date < need.checkOut &&
-    needMatchesIdentity(need, identity) &&
+    needMatchesRoomIdentity(need, identity) &&
     needMatchesHotel(need, hotel) &&
     filteredText(need).includes(getSearch())
   ));
