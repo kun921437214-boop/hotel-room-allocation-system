@@ -55,7 +55,12 @@ async function run() {
     if (result.version !== expectedVersion) {
       throw new Error(`步骤 ${stage} 期间线上主数据被更新，请稍后重新运行维护。`);
     }
-    console.log(`完成 ${stage}${result.maintenance?.table ? `：${result.maintenance.table} ${result.maintenance.rows} 行` : ""}`);
+    const detail = result.maintenance?.table
+      ? `：${result.maintenance.table} ${result.maintenance.rows} 行`
+      : result.maintenance?.groupId
+        ? `：备份组 ${result.maintenance.groupId}`
+        : "";
+    console.log(`完成 ${stage}${detail}`);
   }
 
   const finalState = await jsonRequest("GET");
@@ -66,7 +71,11 @@ async function run() {
   console.log(`维护完成：${finalCounts.needs} 条需求，${finalCounts.people} 人，主数据未变化。`);
 }
 
-run().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+// Node 的连接池可能复用不保持事件循环活跃的套接字；维护结束前显式保持进程存活。
+const keepAlive = setInterval(() => {}, 1000);
+run()
+  .catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  })
+  .finally(() => clearInterval(keepAlive));
