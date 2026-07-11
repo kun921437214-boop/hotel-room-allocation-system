@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>活动酒店房间分配系统</title>
-    <link rel="stylesheet" href="./styles.css?v=20260711-fold2">
+    <link rel="stylesheet" href="./styles.css?v=20260711-sync">
   </head>
   <body>
     <div class="app-shell">
@@ -38,7 +38,10 @@
             </label>
             <button class="ghost-btn topbar-export-btn" id="exportOverviewWorkbookBtn" type="button">导出工作总表</button>
             <span class="upload-progress" id="uploadProgress" hidden>上传 0 / 0</span>
-            <span class="sync-status" id="syncStatus">正在连接共享数据</span>
+            <div class="sync-control">
+              <span class="sync-status" id="syncStatus">正在连接共享数据</span>
+              <button class="sync-retry-btn" id="retrySyncBtn" type="button" hidden>重试同步</button>
+            </div>
           </div>
         </header>
 
@@ -48,7 +51,7 @@
             <section class="panel">
               <div class="panel-header">
                 <div>
-                  <h3>今日待处理</h3>
+                  <h3>待处理事项</h3>
                   <p>优先补齐酒店和房间号。</p>
                 </div>
               </div>
@@ -287,6 +290,7 @@
       </div>
     </dialog>
 
-    <script src="./app.js"></script>
+    <script src="./lib/client-sync-utils.js?v=20260711-sync"></script>
+    <script src="./app.js?v=20260711-sync"></script>
   </body>
 </html>

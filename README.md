@@ -63,13 +63,21 @@ npm run maintenance:refresh
 
 ## 备份恢复
 
+除飞书 Base 内的操作前备份外，建议在 NAS 或独立磁盘上每天执行一次文件备份，使备份与主数据处于不同故障域：
+
+```bash
+BACKUP_DIR="/你的NAS路径/活动房务备份" npm run backup:file
+```
+
+可用 `BACKUP_SOURCE_URL` 指定网站地址，`BACKUP_RETENTION_DAYS` 设置保留天数（默认 30 天）。脚本会生成压缩文件和 SHA-256 校验文件，写入后会自动解压复核。可在 NAS 计划任务或 macOS `launchd` 中每天运行。
+
 恢复只允许在本机运维环境执行，不提供公开网页恢复入口。先在 `每日备份表` 找到“备份组ID”，然后使用与生产环境相同的飞书环境变量运行：
 
 ```bash
 CONFIRM_RESTORE_BACKUP="备份组ID" RESTORE_OPERATOR="操作人" node scripts/restore-backup.js "备份组ID"
 ```
 
-恢复前系统会再次自动备份当前数据；只有校验值正确、分片完整的备份才允许恢复。
+恢复时系统会先启用共享维护锁，阻止网站继续写入；恢复前会再次自动备份当前数据，结束后自动解锁。只有校验值正确、分片完整的备份才允许恢复。
 
 后端环境变量参考 `.env.example`：
 

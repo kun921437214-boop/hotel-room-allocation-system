@@ -246,6 +246,25 @@ button {
   color: var(--red);
 }
 
+.sync-control {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.sync-retry-btn {
+  background: #fff;
+  border: 1px solid #ffc0c0;
+  border-radius: 999px;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 30px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
 .upload-progress {
   align-items: center;
   background: var(--blue-soft);
@@ -1511,11 +1530,15 @@ dialog::backdrop {
   }
 
   .search,
-  .sync-status,
+  .sync-control,
   .topbar-export-btn,
   .table-actions > span,
   .filter-row > .calendar-date-range {
     grid-column: 1 / -1;
+  }
+
+  .sync-control {
+    justify-content: flex-start;
   }
 
   .search input {

@@ -26,6 +26,7 @@ const IDENTITY_OPTIONS = ["工作人员", "评委", "嘉宾", "承办单位", "�
 const ROOM_TYPE_FIELDS = ["双标", "大床", "套房", "其他"];
 const LEGACY_SNAPSHOT_MAX_BYTES = 90 * 1024;
 const REQUEST_BODY_MAX_BYTES = 2 * 1024 * 1024;
+const MAINTENANCE_LOCK_ID = "SYSTEM-MAINTENANCE-LOCK";
 const REFRESH_VIEW_STAGES = ["schema", "backup", "people", "personList", "hotelStats", "roleStats", "cleanup"];
 const REFRESH_STAGE_TABLES = {
   personList: "住宿人员名单",
@@ -917,6 +918,43 @@ async function recordOperation(type, needId, description, tableIds, options = {}
   }, { idempotent: true });
 }
 
+async function maintenanceLockState(tableIds = null) {
+  const { operationTableId } = tableIds || await ensureCoreTableIds({ ensureSchema: false });
+  const records = await listRecords(operationTableId, { filter: `CurrentValue.[操作ID]="${MAINTENANCE_LOCK_ID}"` });
+  const record = records.find((item) => item.fields?.["操作ID"] === MAINTENANCE_LOCK_ID);
+  let details = {};
+  try {
+    details = JSON.parse(record?.fields?.["说明"] || "{}");
+  } catch {
+    details = {};
+  }
+  const locked = record?.fields?.["结果"] === "锁定" && Date.parse(details.expiresAt || "") > Date.now();
+  return { locked, record, details };
+}
+
+async function setMaintenanceLock(locked, tableIds, options = {}) {
+  const { operationTableId } = tableIds || await ensureCoreTableIds();
+  const current = await maintenanceLockState({ operationTableId });
+  const now = nowIso();
+  const fields = {
+    "操作ID": MAINTENANCE_LOCK_ID,
+    "操作时间": now,
+    "操作类型": "系统维护锁",
+    "操作人": options.operator || "维护脚本",
+    "结果": locked ? "锁定" : "解锁",
+    "说明": JSON.stringify({
+      reason: options.reason || "",
+      lockedAt: now,
+      expiresAt: locked ? new Date(Date.now() + (options.ttlMs || 30 * 60 * 1000)).toISOString() : now
+    })
+  };
+  if (current.record?.record_id) {
+    await feishu("PUT", `/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${operationTableId}/records/${current.record.record_id}`, { fields });
+  } else {
+    await batchCreateRecords(operationTableId, [{ fields }], `${MAINTENANCE_LOCK_ID}:create`);
+  }
+}
+
 function stateSummary(state) {
   const needs = Array.isArray(state?.needs) ? state.needs : [];
   return {
@@ -1072,24 +1110,30 @@ async function readBackupState(backupId, tableIds = null) {
 async function restoreBackupById(backupId, options = {}) {
   if (!backupId) throw new Error("缺少备份组ID。");
   const tableIds = await ensureCoreTableIds();
-  const current = await readCoreState(tableIds);
-  const restoredState = await readBackupState(backupId, tableIds);
-  const restoredNeeds = validateNeedsPayload(restoredState.needs || []);
-  await createOperationBackup(current.state, tableIds, {
-    operation: "恢复备份",
-    reason: `恢复 ${backupId} 前自动备份`
-  });
-  const operationId = options.operationId || `RESTORE-${Date.now()}`;
-  await upsertNeedsCore(restoredNeeds, tableIds, null, { operationId });
-  const restoredIds = new Set(restoredNeeds.map((need) => need.id));
-  const obsoleteIds = (current.state.needs || []).map((need) => need.id).filter((id) => !restoredIds.has(id));
-  await deleteNeedsCore(obsoleteIds, tableIds);
-  await recordOperation("恢复备份", "", `已从 ${backupId} 恢复 ${restoredNeeds.length} 条需求`, tableIds, {
-    operationId,
-    count: restoredNeeds.length,
-    operator: options.operator || "本地恢复脚本"
-  });
-  return readCoreState(tableIds);
+  await setMaintenanceLock(true, tableIds, { operator: options.operator, reason: `恢复备份 ${backupId}` });
+  try {
+    await sleep(2000);
+    const current = await readCoreState(tableIds);
+    const restoredState = await readBackupState(backupId, tableIds);
+    const restoredNeeds = validateNeedsPayload(restoredState.needs || []);
+    await createOperationBackup(current.state, tableIds, {
+      operation: "恢复备份",
+      reason: `恢复 ${backupId} 前自动备份`
+    });
+    const operationId = options.operationId || `RESTORE-${Date.now()}`;
+    await upsertNeedsCore(restoredNeeds, tableIds, null, { operationId });
+    const restoredIds = new Set(restoredNeeds.map((need) => need.id));
+    const obsoleteIds = (current.state.needs || []).map((need) => need.id).filter((id) => !restoredIds.has(id));
+    await deleteNeedsCore(obsoleteIds, tableIds);
+    await recordOperation("恢复备份", "", `已从 ${backupId} 恢复 ${restoredNeeds.length} 条需求`, tableIds, {
+      operationId,
+      count: restoredNeeds.length,
+      operator: options.operator || "本地恢复脚本"
+    });
+    return await readCoreState(tableIds);
+  } finally {
+    await setMaintenanceLock(false, tableIds, { operator: options.operator, reason: `恢复备份 ${backupId} 完成` });
+  }
 }
 
 function stateFromCoreRecords(needRecords, personRecords) {
@@ -1184,7 +1228,15 @@ function stateFromCoreRecords(needRecords, personRecords) {
 async function readCoreState(tableIds = null) {
   const ids = tableIds || await ensureCoreTableIds({ ensureSchema: false });
   const needRecords = await listActiveRecords(ids.needTableId);
-  const personRecords = await listActiveRecords(ids.personTableId);
+  const jsonReady = activeUniqueRecords(needRecords, "需求ID").every((record) => {
+    try {
+      const value = JSON.parse(record.fields?.["需求JSON"] || "");
+      return value && value.id === record.fields?.["需求ID"];
+    } catch {
+      return false;
+    }
+  });
+  const personRecords = jsonReady ? [] : await listActiveRecords(ids.personTableId);
   const state = stateFromCoreRecords(needRecords, personRecords);
   return { state, version: stateVersion(state), tableIds: ids, hasCoreRecords: needRecords.length > 0 };
 }
@@ -1507,6 +1559,50 @@ function mutationAlreadyApplied(body, state) {
   return false;
 }
 
+function hasTargetBaseline(body) {
+  return Object.prototype.hasOwnProperty.call(body || {}, "baseNeed") || Array.isArray(body?.baseNeeds);
+}
+
+function targetStateIsUnchanged(body, state) {
+  const currentNeeds = new Map((state.needs || []).map((need) => [need.id, need]));
+  if (body.action === "upsertNeed") {
+    const current = currentNeeds.get(body.need.id) || null;
+    if (current && needsEqual(current, body.need)) return true;
+    return body.baseNeed ? Boolean(current && needsEqual(current, body.baseNeed)) : !current;
+  }
+  if (body.action === "deleteNeed") {
+    const current = currentNeeds.get(body.needId) || null;
+    if (!current) return true;
+    return Boolean(body.baseNeed && needsEqual(current, body.baseNeed));
+  }
+  if (body.action === "upsertNeeds") {
+    const baseById = new Map((body.baseNeeds || []).map((need) => [need.id, need]));
+    return body.needs.every((need) => {
+      const current = currentNeeds.get(need.id) || null;
+      if (current && needsEqual(current, need)) return true;
+      const base = baseById.get(need.id);
+      return base ? Boolean(current && needsEqual(current, base)) : !current;
+    });
+  }
+  if (body.action === "deleteNeeds") {
+    const baseById = new Map((body.baseNeeds || []).map((need) => [need.id, need]));
+    return body.needIds.every((id) => {
+      const current = currentNeeds.get(id) || null;
+      if (!current) return true;
+      const base = baseById.get(id);
+      return Boolean(base && needsEqual(current, base));
+    });
+  }
+  return false;
+}
+
+function mutationHasConflict(body, current) {
+  if (hasTargetBaseline(body) && ["upsertNeed", "upsertNeeds", "deleteNeed", "deleteNeeds"].includes(body.action)) {
+    return !targetStateIsUnchanged(body, current.state);
+  }
+  return current.version !== body.baseVersion;
+}
+
 function validateMutationBody(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("请求数据格式无效。");
   const normalized = { ...body };
@@ -1515,14 +1611,22 @@ function validateMutationBody(body) {
   normalized.operator = String(body.operator || "").slice(0, 80);
   if (body.action === "upsertNeed") {
     normalized.need = validateNeedsPayload([body.need])[0];
+    if (Object.prototype.hasOwnProperty.call(body, "baseNeed")) {
+      normalized.baseNeed = body.baseNeed === null ? null : validateNeedsPayload([body.baseNeed])[0];
+    }
   } else if (body.action === "upsertNeeds") {
     normalized.needs = validateNeedsPayload(body.needs || []);
+    if (Array.isArray(body.baseNeeds)) normalized.baseNeeds = validateNeedsPayload(body.baseNeeds);
   } else if (body.action === "deleteNeed") {
     normalized.needId = String(body.needId || "").trim().slice(0, 120);
     if (!normalized.needId) throw new ValidationError("缺少需要删除的需求ID。");
+    if (Object.prototype.hasOwnProperty.call(body, "baseNeed")) {
+      normalized.baseNeed = body.baseNeed === null ? null : validateNeedsPayload([body.baseNeed])[0];
+    }
   } else if (body.action === "deleteNeeds") {
     if (!Array.isArray(body.needIds) || body.needIds.length > 1000) throw new ValidationError("批量删除列表无效或超过 1000 条。", 413);
     normalized.needIds = Array.from(new Set(body.needIds.map((id) => String(id || "").trim()).filter(Boolean)));
+    if (Array.isArray(body.baseNeeds)) normalized.baseNeeds = validateNeedsPayload(body.baseNeeds);
   } else if (body.action === "cleanupDuplicates") {
     // 维护动作没有业务数据负载。
   } else if (body.action === "refreshViews") {
@@ -1553,6 +1657,10 @@ function operationLogOptions(body, requestId, count) {
 async function processMutation(body, requestId) {
   const isRefreshViews = body.action === "refreshViews";
   const tableIds = await ensureCoreTableIds({ ensureSchema: !isRefreshViews || body.stage === "schema" });
+  const maintenance = await maintenanceLockState(tableIds);
+  if (maintenance.locked) {
+    return { status: 423, body: { ok: false, error: "系统正在恢复备份，请稍后再试。", code: "MAINTENANCE_LOCKED" } };
+  }
   const deferMirror = body.deferMirror === true;
   let cleanupResult = null;
   let maintenanceResult = null;
@@ -1570,7 +1678,7 @@ async function processMutation(body, requestId) {
     if (!body.baseVersion) {
       return { status: 428, body: { ok: false, stale: true, error: "缺少数据版本，请刷新后重新操作。", state: current.state, version: current.version } };
     }
-    if (current.version !== body.baseVersion) {
+    if (mutationHasConflict(body, current)) {
       if (mutationAlreadyApplied(body, current.state)) {
         return { status: 200, body: { ok: true, replayed: true, state: current.state, version: current.version, source: "core_tables" } };
       }
@@ -1596,7 +1704,7 @@ async function processMutation(body, requestId) {
       reason: body.operationDescription || "数据修改前自动完整备份"
     });
     const latest = await readCoreState(tableIds);
-    if (shouldCheckStateVersion(body) && latest.version !== body.baseVersion) {
+    if (shouldCheckStateVersion(body) && mutationHasConflict(body, latest)) {
       if (mutationAlreadyApplied(body, latest.state)) {
         return { status: 200, body: { ok: true, replayed: true, state: latest.state, version: latest.version, source: "core_tables" } };
       }
@@ -1612,6 +1720,11 @@ async function processMutation(body, requestId) {
         }
       };
     }
+  }
+
+  const maintenanceBeforeWrite = await maintenanceLockState(tableIds);
+  if (maintenanceBeforeWrite.locked) {
+    return { status: 423, body: { ok: false, error: "系统正在恢复备份，请稍后再试。", code: "MAINTENANCE_LOCKED" } };
   }
 
   let logArgs = null;

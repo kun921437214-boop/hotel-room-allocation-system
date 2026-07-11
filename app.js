@@ -3,6 +3,9 @@ const syncApiUrl = window.HOTEL_ROOM_SYNC_API || "/api/state";
 const workbookExportApiUrl = window.HOTEL_ROOM_WORKBOOK_EXPORT_API || "/api/export-workbook";
 const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
 const clientIdStorageKey = `${storageKey}.clientId`;
+const syncOutboxStorageKey = `${storageKey}.syncOutbox`;
+const lastSyncStorageKey = `${storageKey}.lastSyncAt`;
+const { analyzeNeedMerge, applyOperationToState } = window.ClientSyncUtils;
 
 const sampleData = {
   hotels: [
@@ -25,12 +28,11 @@ let remoteSyncReady = false;
 let saveTimer = null;
 let saveInFlight = false;
 let saveQueued = false;
-let remoteOperationChain = Promise.resolve();
-let remoteOperationPending = 0;
-let localStateRevision = 0;
-let needsRemoteSaveAfterLoad = false;
 let uploadInProgress = false;
 let remoteStateVersion = "";
+let outboxProcessing = false;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
 
 function randomOperationId(prefix = "OP") {
   const value = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -56,6 +58,42 @@ function remotePayload(payload, baseVersion = remoteStateVersion) {
     operator: payload.operator || `设备-${clientId.slice(-8)}`,
     baseVersion
   };
+}
+
+function loadSyncOutbox() {
+  try {
+    const value = JSON.parse(localStorage.getItem(syncOutboxStorageKey) || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSyncOutbox(items) {
+  localStorage.setItem(syncOutboxStorageKey, JSON.stringify(items));
+}
+
+function pendingSyncCount() {
+  return loadSyncOutbox().length;
+}
+
+function syncTimeLabel(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("网络请求超时，请检查网络后重试。");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const $ = (selector) => document.querySelector(selector);
@@ -108,7 +146,6 @@ function loadState() {
 }
 
 function saveState() {
-  markLocalStateChanged();
   localStorage.setItem(storageKey, JSON.stringify(state));
   scheduleRemoteSave();
 }
@@ -116,39 +153,54 @@ function saveState() {
 function setSyncStatus(message, type = "") {
   const status = $("#syncStatus");
   if (!status) return;
-  status.textContent = message;
+  const pending = pendingSyncCount();
+  const lastSaved = syncTimeLabel(localStorage.getItem(lastSyncStorageKey));
+  const details = pending ? ` · 待同步 ${pending} 条` : type === "ok" && lastSaved ? ` · ${lastSaved}` : "";
+  status.textContent = `${message}${details}`;
   status.className = ["sync-status", type].filter(Boolean).join(" ");
+  const retry = $("#retrySyncBtn");
+  if (retry) retry.hidden = type !== "bad" && pending === 0;
 }
 
 function saveLocalStateOnly() {
   localStorage.setItem(storageKey, JSON.stringify(state));
 }
 
-function markLocalStateChanged() {
-  localStateRevision += 1;
-  if (!remoteSyncReady) needsRemoteSaveAfterLoad = true;
+function replayOutbox(remoteState, items = loadSyncOutbox()) {
+  return items.reduce((current, item) => applyOperationToState(current, item.payload), remoteState);
 }
 
-async function loadRemoteState() {
+function scheduleReconnect(delayMs) {
+  clearTimeout(reconnectTimer);
+  if (navigator.onLine === false) return;
+  const baseDelay = delayMs ?? Math.min(60000, 5000 * (2 ** reconnectAttempt));
+  const jitteredDelay = Math.round(baseDelay * (0.85 + Math.random() * 0.3));
+  reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
+  reconnectTimer = setTimeout(() => retryPendingSync(), jitteredDelay);
+}
+
+async function loadRemoteState(options = {}) {
   setSyncStatus("正在连接共享数据");
   try {
-    const response = await fetch(syncApiUrl, { cache: "no-store" });
+    const response = await fetchWithTimeout(syncApiUrl, { cache: "no-store" }, 15000);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     if (payload?.state) {
-      state = payload.state;
       remoteStateVersion = payload.version || "";
+      state = replayOutbox(payload.state);
       saveLocalStateOnly();
     }
     remoteSyncReady = true;
-    needsRemoteSaveAfterLoad = false;
+    reconnectAttempt = 0;
     saveQueued = false;
     clearTimeout(saveTimer);
-    setSyncStatus("共享数据已同步", "ok");
+    setSyncStatus(pendingSyncCount() ? "已连接，正在补传" : "共享数据已同步", pendingSyncCount() ? "" : "ok");
+    if (options.processOutbox !== false && pendingSyncCount()) processRemoteOutbox();
     return true;
   } catch (error) {
     remoteSyncReady = false;
-    setSyncStatus("本地模式，未连接共享数据", "bad");
+    setSyncStatus("未连接共享数据", "bad");
+    scheduleReconnect();
     return false;
   }
 }
@@ -169,11 +221,30 @@ function handleStaleRemoteResult(result) {
   setSyncStatus("检测到修改冲突，本机修改已保留", "bad");
 }
 
-async function resolveStaleRemoteResult(payload, result) {
+function needFieldLabel(key) {
+  return ({
+    name: "姓名",
+    gender: "性别",
+    phone: "电话",
+    idNo: "身份证号",
+    identity: "人员性质",
+    checkIn: "入住日期",
+    checkOut: "离店日期",
+    hotel: "安排酒店",
+    roomNo: "房间号",
+    roomType: "房间类型",
+    note: "备注",
+    companions: "增加人员"
+  })[key] || key;
+}
+
+async function resolveStaleRemoteResult(payload, result, conflictFields = []) {
   handleStaleRemoteResult(result);
   const action = await showUploadDialog({
     title: "检测到同时修改",
-    message: "其他同事已经更新了共享数据。你刚才的修改仍保留在本机，可以基于最新版本继续保存，或采用线上数据。",
+    message: conflictFields.length
+      ? `其他同事也修改了：${conflictFields.map(needFieldLabel).join("、")}。继续保存只会覆盖这些冲突字段，其余线上修改会保留。`
+      : "其他同事已经更新了共享数据。你刚才的修改仍保留在本机，可以基于最新版本继续保存，或采用线上数据。",
     primaryText: "继续保存我的修改",
     secondaryText: "采用线上数据"
   });
@@ -186,13 +257,24 @@ async function resolveStaleRemoteResult(payload, result) {
 async function sendRemoteMutation(payload) {
   const stablePayload = remotePayload(payload);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(syncApiUrl, {
+    const response = await fetchWithTimeout(syncApiUrl, {
       method: "PUT",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({ ...stablePayload, baseVersion: remoteStateVersion })
-    });
+    }, 30000);
     const result = await response.json().catch(() => ({}));
     if (response.status === 409 && result?.stale) {
+      if (stablePayload.action === "upsertNeed" && Object.prototype.hasOwnProperty.call(stablePayload, "baseNeed")) {
+        const remoteNeed = result.state?.needs?.find((need) => need.id === stablePayload.need?.id) || null;
+        const merge = analyzeNeedMerge(stablePayload.baseNeed, stablePayload.need, remoteNeed);
+        stablePayload.need = merge.merged;
+        stablePayload.baseNeed = remoteNeed;
+        remoteStateVersion = result.version || remoteStateVersion;
+        if (!merge.conflicts.length) continue;
+        const retry = await resolveStaleRemoteResult(stablePayload, result, merge.conflicts);
+        if (retry) continue;
+        return { discarded: true, result };
+      }
       const retry = await resolveStaleRemoteResult(stablePayload, result);
       if (retry) continue;
       return { discarded: true, result };
@@ -208,7 +290,6 @@ async function sendRemoteMutation(payload) {
 }
 
 function scheduleRemoteSave() {
-  if (!remoteSyncReady) return;
   saveQueued = true;
   clearTimeout(saveTimer);
   if (saveInFlight) return;
@@ -216,78 +297,74 @@ function scheduleRemoteSave() {
 }
 
 async function syncStateToRemote() {
-  if (!remoteSyncReady || saveInFlight || !saveQueued) return;
-  const startedAtRevision = localStateRevision;
+  if (saveInFlight || !saveQueued) return;
   saveQueued = false;
   saveInFlight = true;
-  setSyncStatus("正在保存共享数据");
-  try {
-    const sent = await sendRemoteMutation({ state, operationId: randomOperationId("STATE") });
-    if (sent.discarded) return;
-    const result = sent.result;
-    if (result?.version) remoteStateVersion = result.version;
-    if (result?.state && startedAtRevision === localStateRevision) {
-      applyRemoteResult(result, true);
-    }
-    remoteSyncReady = true;
-    if (result?.personMirrorError || result?.operationLogError) {
-      setSyncStatus("主数据已保存，飞书明细待修复", "bad");
-    } else {
-      setSyncStatus("共享数据已保存", "ok");
-    }
-  } catch (error) {
-    remoteSyncReady = false;
-    setSyncStatus("保存失败，已保存在本机", "bad");
-  } finally {
-    saveInFlight = false;
-    if (remoteSyncReady && saveQueued) {
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(syncStateToRemote, 0);
-    }
-  }
+  queueRemoteOperation({ state: structuredClone(state), operationId: randomOperationId("STATE") });
+  saveInFlight = false;
 }
 
 function queueRemoteOperation(payload) {
-  if (!remoteSyncReady) return;
   const queuedPayload = { ...payload, operationId: payload.operationId || randomOperationId("MUTATION") };
-  remoteOperationPending += 1;
-  setSyncStatus("正在保存共享数据");
-  remoteOperationChain = remoteOperationChain
-    .catch(() => {})
-    .then(() => syncOperationToRemote(queuedPayload))
-    .finally(() => {
-      remoteOperationPending = Math.max(0, remoteOperationPending - 1);
-    });
+  const items = loadSyncOutbox();
+  if (!items.some((item) => item.id === queuedPayload.operationId)) {
+    items.push({ id: queuedPayload.operationId, createdAt: new Date().toISOString(), payload: queuedPayload });
+    saveSyncOutbox(items);
+  }
+  setSyncStatus(remoteSyncReady ? "正在保存共享数据" : "修改已加入待同步队列", remoteSyncReady ? "" : "bad");
+  if (remoteSyncReady && navigator.onLine !== false) processRemoteOutbox();
+  else scheduleReconnect();
 }
 
-async function syncOperationToRemote(payload) {
-  if (!remoteSyncReady) return;
+async function processRemoteOutbox() {
+  if (outboxProcessing || !remoteSyncReady || navigator.onLine === false) return;
+  outboxProcessing = true;
   try {
-    const sent = await sendRemoteMutation(payload);
-    if (sent.discarded) return;
-    const result = sent.result;
-    if (result?.version) remoteStateVersion = result.version;
-    if (result?.state && remoteOperationPending <= 1) {
-      applyRemoteResult(result, true);
+    while (remoteSyncReady) {
+      const items = loadSyncOutbox();
+      if (!items.length) break;
+      const current = items[0];
+      setSyncStatus("正在保存共享数据");
+      const sent = await sendRemoteMutation(current.payload);
+      const remaining = loadSyncOutbox().filter((item) => item.id !== current.id);
+      saveSyncOutbox(remaining);
+      if (sent.result?.version) remoteStateVersion = sent.result.version;
+      if (sent.result?.state) {
+        state = replayOutbox(sent.result.state, remaining);
+        saveLocalStateOnly();
+        render();
+      }
+      localStorage.setItem(lastSyncStorageKey, new Date().toISOString());
+      if (sent.result?.personMirrorError || sent.result?.operationLogError) {
+        setSyncStatus("主数据已保存，飞书明细待修复", "bad");
+      }
     }
-    remoteSyncReady = true;
-    if (result?.personMirrorError || result?.operationLogError) {
-      setSyncStatus("主数据已保存，飞书明细待修复", "bad");
-    } else {
-      setSyncStatus("共享数据已保存", "ok");
-    }
+    if (!pendingSyncCount()) setSyncStatus("共享数据已保存", "ok");
   } catch (error) {
     remoteSyncReady = false;
-    setSyncStatus("保存失败，已保存在本机", "bad");
+    setSyncStatus("同步失败，可点击重试", "bad");
+    scheduleReconnect();
+  } finally {
+    outboxProcessing = false;
   }
 }
 
+async function retryPendingSync() {
+  clearTimeout(reconnectTimer);
+  if (navigator.onLine === false) {
+    setSyncStatus("网络离线，等待恢复", "bad");
+    return;
+  }
+  const loaded = remoteSyncReady || await loadRemoteState({ processOutbox: false });
+  if (loaded) processRemoteOutbox();
+}
+
 function saveNeedState(need, meta = {}) {
-  markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({
     action: "upsertNeed",
     need,
+    baseNeed: Object.prototype.hasOwnProperty.call(meta, "baseNeed") ? meta.baseNeed : null,
     operationType: meta.operationType,
     operationDescription: meta.operationDescription,
     batchId: need.uploadBatchId || ""
@@ -295,11 +372,11 @@ function saveNeedState(need, meta = {}) {
 }
 
 function saveNeedsState(needs, meta = {}) {
-  markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({
     action: "upsertNeeds",
     needs,
+    baseNeeds: meta.baseNeeds || [],
     operationType: meta.operationType,
     operationDescription: meta.operationDescription,
     batchId: meta.batchId || ""
@@ -307,11 +384,11 @@ function saveNeedsState(needs, meta = {}) {
 }
 
 function deleteNeedState(needId, meta = {}) {
-  markLocalStateChanged();
   saveLocalStateOnly();
   queueRemoteOperation({
     action: "deleteNeed",
     needId,
+    baseNeed: meta.baseNeed || null,
     operationType: meta.operationType,
     operationDescription: meta.operationDescription,
     batchId: meta.batchId || ""
@@ -463,11 +540,11 @@ function showUploadDialog({ title, message, meta = "", primaryText = "继续上�
 
 async function syncUploadPayload(payload) {
   const requestPayload = remotePayload(payload);
-  const response = await fetch(syncApiUrl, {
+  const response = await fetchWithTimeout(syncApiUrl, {
     method: "PUT",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(requestPayload)
-  });
+  }, 45000);
   const result = await response.json().catch(() => ({}));
   if ([409, 428].includes(response.status) && result?.stale) {
     handleStaleRemoteResult(result);
@@ -507,6 +584,7 @@ async function uploadNeedTaskOnce(task) {
     action: "upsertNeeds",
     operationId: task.id,
     needs: task.needs,
+    baseNeeds: [],
     batchId: task.id,
     batchName: task.batchName,
     uploadBatchTime: task.createdAt,
@@ -519,11 +597,14 @@ async function uploadNeedTaskOnce(task) {
   if (result?.state) {
     applyRemoteResult(result, true);
   }
+  localStorage.setItem(lastSyncStorageKey, new Date().toISOString());
   clearPendingUploadTask();
   render();
   setUploadProgress(`完成 ${task.total} / ${task.total}`, "done");
   if (result?.personMirrorError || result?.operationLogError) {
     setSyncStatus("主数据已保存，飞书明细待修复", "bad");
+  } else {
+    setSyncStatus("共享数据已保存", "ok");
   }
   setTimeout(() => {
     if (!loadPendingUploadTask()) setUploadProgress("");
@@ -539,6 +620,7 @@ async function rollbackUploadTask(task) {
     action: "deleteNeeds",
     operationId: `ROLLBACK-${task.id}`,
     needIds: ids,
+    baseNeeds: task.needs,
     batchId: task.id,
     operationType: "撤回上传批次",
     operationDescription: `${task.batchName || task.id} 撤回 ${ids.length} 条住宿需求`
@@ -2151,22 +2233,25 @@ function renderTasks() {
       .map((item) => item.dataset.taskType)
   );
   const taskGroups = {
-    hotel: new Set(),
-    date: new Set(),
-    info: new Set(),
-    roomNo: new Set()
+    hotel: new Map(),
+    date: new Map(),
+    info: new Map(),
+    roomNo: new Map()
   };
   const addNeedNames = (group, need) => {
-    peopleForNeed(need).forEach((person) => group.add(person.name || "未填写姓名"));
+    peopleForNeed(need).forEach((person, index) => {
+      group.set(`${need.id}:${person.personId || index}`, person.name || `未填写姓名（序号 ${need.id}）`);
+    });
   };
-  currentFilteredNeeds().forEach((need) => {
+  const search = getSearch();
+  visibleNeeds().filter((need) => needSearchText(need).includes(search)).forEach((need) => {
     if (!need.hotel) addNeedNames(taskGroups.hotel, need);
     if (!need.checkIn || !need.checkOut) addNeedNames(taskGroups.date, need);
     if (!need.roomNo) addNeedNames(taskGroups.roomNo, need);
     peopleForNeed(need).forEach((person, index) => {
       const identity = index === 0 ? need.identity : person.identity;
       if (!person.phone || !person.idNo || !person.gender || !identity) {
-        taskGroups.info.add(person.name || "未填写姓名");
+        taskGroups.info.set(`${need.id}:${person.personId || index}`, person.name || `未填写姓名（序号 ${need.id}）`);
       }
     });
   });
@@ -2183,7 +2268,7 @@ function renderTasks() {
         <span>共 ${names.size} 人</span>
         <span class="task-collapse-icon" aria-hidden="true"></span>
       </summary>
-      <div class="task-collapse-body">${Array.from(names).map(escapeHtml).join("、")}</div>
+      <div class="task-collapse-body">${Array.from(names.values()).map(escapeHtml).join("、")}</div>
     </details>
   `).join("") : `<div class="task status-green"><strong>暂无待补信息</strong><span>当前入住需求的酒店、日期、基础信息和房间号都已填写。</span></div>`;
 }
@@ -2841,6 +2926,16 @@ function bindEvents() {
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.view)));
   $("#searchInput").addEventListener("input", render);
   $("#exportOverviewWorkbookBtn")?.addEventListener("click", exportOverviewWorkbook);
+  $("#retrySyncBtn")?.addEventListener("click", retryPendingSync);
+  window.addEventListener("online", () => {
+    reconnectAttempt = 0;
+    retryPendingSync();
+  });
+  window.addEventListener("offline", () => {
+    clearTimeout(reconnectTimer);
+    remoteSyncReady = false;
+    setSyncStatus("网络离线，修改会稍后同步", "bad");
+  });
   $("#needHotelFilter")?.addEventListener("change", renderNeeds);
   $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
   $("#calendarIdentity").addEventListener("change", renderCalendar);
@@ -2908,6 +3003,7 @@ function bindEvents() {
       return {
         type: "need",
         need,
+        baseNeed: null,
         operationType: "新增需求",
         operationDescription: `网站新增入住需求：${need.name || need.id}`
       };
@@ -3057,6 +3153,7 @@ function bindEvents() {
       if (!confirm(`确定删除 ${need.name || "这条入住需求"} 吗？`)) return;
       state.needs = state.needs.filter((item) => item.id !== need.id);
       deleteNeedState(need.id, {
+        baseNeed: structuredClone(need),
         operationType: "删除需求",
         operationDescription: `网站删除入住需求：${need.name || need.id}`,
         batchId: need.uploadBatchId || ""
@@ -3077,6 +3174,7 @@ function bindEvents() {
     }
     if (needBtn) {
       const need = needById(needBtn.dataset.editNeed);
+      const baseNeed = structuredClone(need);
       openDialog("编辑入住需求", needFields(), need, (values) => {
         validateOptionalStayDates(values.checkIn, values.checkOut, "入住需求");
         Object.assign(need, normalizeNeedValues(values));
@@ -3084,6 +3182,7 @@ function bindEvents() {
         return {
           type: "need",
           need,
+          baseNeed,
           operationType: "编辑需求",
           operationDescription: `网站编辑入住需求：${need.name || need.id}`
         };
@@ -3121,6 +3220,7 @@ function bindEvents() {
     }
     if (result?.type === "need") {
       saveNeedState(result.need, {
+        baseNeed: result.baseNeed,
         operationType: result.operationType,
         operationDescription: result.operationDescription
       });

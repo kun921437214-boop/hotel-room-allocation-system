@@ -183,9 +183,56 @@ async function run() {
   assert.equal(conflict.body.stale, true);
   assert.equal(conflict.body.state.needs[0].roomNo, "801");
 
+  const unrelatedChange = await invoke("PUT", {
+    action: "upsertNeed",
+    operationId: "TEST-TARGETED-NEW",
+    clientId: "TEST-CLIENT-3",
+    baseVersion: firstGet.body.version,
+    baseNeed: null,
+    need: sampleNeed({ id: "REQ-002", name: "李四", roomNo: "802" })
+  });
+  assert.equal(unrelatedChange.status, 200, "单条基准未冲突时不应被无关的全局版本变化阻塞");
+
+  const targetedEdit = await invoke("PUT", {
+    action: "upsertNeed",
+    operationId: "TEST-TARGETED-EDIT",
+    clientId: "TEST-CLIENT-4",
+    baseVersion: firstGet.body.version,
+    baseNeed: sampleNeed(),
+    need: sampleNeed({ phone: "13100000000" })
+  });
+  assert.equal(targetedEdit.status, 200);
+  assert.equal(targetedEdit.body.state.needs.find((need) => need.id === "REQ-001").phone, "13100000000");
+
+  const sameRecordConflict = await invoke("PUT", {
+    action: "upsertNeed",
+    operationId: "TEST-TARGETED-CONFLICT",
+    clientId: "TEST-CLIENT-5",
+    baseVersion: firstGet.body.version,
+    baseNeed: sampleNeed(),
+    need: sampleNeed({ roomNo: "803" })
+  });
+  assert.equal(sameRecordConflict.status, 409, "同一需求已变化时必须阻止覆盖");
+
+  const lockRecord = nextRecord({
+    "操作ID": "SYSTEM-MAINTENANCE-LOCK",
+    "结果": "锁定",
+    "说明": JSON.stringify({ expiresAt: new Date(Date.now() + 60000).toISOString() })
+  });
+  records.operation.push(lockRecord);
+  const lockedSave = await invoke("PUT", {
+    action: "upsertNeed",
+    operationId: "TEST-MAINTENANCE-LOCK",
+    baseVersion: targetedEdit.body.version,
+    baseNeed: targetedEdit.body.state.needs.find((need) => need.id === "REQ-001"),
+    need: sampleNeed({ phone: "13200000000" })
+  });
+  assert.equal(lockedSave.status, 423, "恢复备份期间必须阻止网站写入");
+  records.operation = records.operation.filter((record) => record.record_id !== lockRecord.record_id);
+
   const secondGet = await invoke("GET");
   assert.equal(secondGet.status, 200);
-  assert.equal(secondGet.body.state.needs.length, 1);
+  assert.equal(secondGet.body.state.needs.length, 2);
 }
 
 run().catch((error) => {
