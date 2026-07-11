@@ -481,7 +481,7 @@ async function upsertReadableRecords(tableId, keyField, rows) {
   const deletes = [];
   for (const record of uniqueExistingRecords) {
     const key = String(record.fields?.[keyField] || "");
-    if (key && !incomingKeys.has(key)) {
+    if (!key || !incomingKeys.has(key)) {
       deletes.push(record.record_id);
     }
   }
