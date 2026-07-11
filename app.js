@@ -33,6 +33,7 @@ let remoteStateVersion = "";
 let outboxProcessing = false;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
+let needSortMode = "uploadDesc";
 
 function randomOperationId(prefix = "OP") {
   const value = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1016,7 +1017,7 @@ function compareNeedSortValues(left, right, direction) {
 }
 
 function currentSortedNeeds() {
-  const mode = $("#needSort")?.value || "uploadDesc";
+  const mode = needSortMode;
   const [field, direction] = mode === "uploadAsc"
     ? ["upload", 1]
     : mode === "checkInAsc"
@@ -2581,9 +2582,9 @@ function renderAssignments() {
   }).join("");
 }
 
-function table(headers, rows, rowActions) {
+function table(headers, rows, rowActions, actionHeader = "操作") {
   return `
-    <thead><tr>${headers.map((h) => `<th>${h.label}</th>`).join("")}<th>操作</th></tr></thead>
+    <thead><tr>${headers.map((h) => `<th>${h.label}</th>`).join("")}<th>${actionHeader}</th></tr></thead>
     <tbody>
       ${rows.map((row) => `
         <tr>
@@ -2672,6 +2673,20 @@ function renderNeeds() {
   const peopleCount = rows.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
   const nightCount = rows.reduce((sum, need) => sum + needNightCount(need), 0);
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，${peopleCount} 人，${nightCount} 间夜`;
+  const sortOptions = [
+    ["uploadDesc", "新→旧", "上传时间：最新优先"],
+    ["uploadAsc", "旧→新", "上传时间：最早优先"],
+    ["checkInAsc", "入住↑", "入住日期：早到晚"],
+    ["checkInDesc", "入住↓", "入住日期：晚到早"]
+  ];
+  const sortHeader = `
+    <div class="needs-action-header">
+      <span>操作</span>
+      <select id="needSort" aria-label="排序方式" title="选择入住需求排序方式">
+        ${sortOptions.map(([value, shortLabel, fullLabel]) => `<option value="${value}" title="${fullLabel}" ${value === needSortMode ? "selected" : ""}>${shortLabel}</option>`).join("")}
+      </select>
+    </div>
+  `;
   $("#needsTable").innerHTML = table([
     { key: "sequence", label: "序号" },
     { key: "nameList", label: "姓名", html: true },
@@ -2688,7 +2703,11 @@ function renderNeeds() {
   ], rows, (row) => `
     <button class="mini-btn" data-edit-need="${row.id}">编辑</button>
     <button class="mini-btn danger-mini-btn" data-delete-need="${row.id}">删除</button>
-  `);
+  `, sortHeader);
+  $("#needSort")?.addEventListener("change", (event) => {
+    needSortMode = event.target.value;
+    renderNeeds();
+  });
 }
 
 function renderRooms() {
@@ -2965,7 +2984,6 @@ function bindEvents() {
   });
   $("#needHotelFilter")?.addEventListener("change", renderNeeds);
   $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
-  $("#needSort")?.addEventListener("change", renderNeeds);
   $("#calendarIdentity").addEventListener("change", renderCalendar);
   $("#exportHotelStatsBtn")?.addEventListener("click", exportHotelStats);
   $("#roleHotel").addEventListener("change", renderRoleStats);

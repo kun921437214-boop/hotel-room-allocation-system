@@ -924,12 +924,27 @@ td .row-actions {
 
 #needsTable th:nth-child(12),
 #needsTable td:nth-child(12) {
-  width: 10.4%;
+  width: 9.4%;
 }
 
 #needsTable th:nth-child(13),
 #needsTable td:nth-child(13) {
-  width: 6%;
+  width: 7%;
+}
+
+.needs-action-header {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.needs-action-header select {
+  border-radius: 5px;
+  font-size: 9px;
+  height: 22px;
+  max-width: 54px;
+  padding: 1px 3px;
 }
 
 .compact-lines {
