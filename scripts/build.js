@@ -29,4 +29,13 @@ const vercel = JSON.parse(fs.readFileSync(path.join(root, "vercel.json"), "utf8"
 if (!Array.isArray(vercel.regions) || !vercel.regions.length) throw new Error("vercel.json 缺少部署区域配置。");
 if (!Array.isArray(vercel.headers) || !vercel.headers.length) throw new Error("vercel.json 缺少安全响应头配置。");
 
-console.log(`生产构建检查通过：${runtimeFiles.length} 个运行文件，静态资源和 Vercel 配置完整。`);
+const output = path.join(root, "public");
+fs.rmSync(output, { recursive: true, force: true });
+fs.mkdirSync(path.join(output, "lib"), { recursive: true });
+for (const file of ["index.html", "styles.css", "app.js", "lib/html-utils.js", "lib/client-sync-utils.js"]) {
+  const target = path.join(output, file);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(path.join(root, file), target);
+}
+
+console.log(`生产构建检查通过：${runtimeFiles.length} 个运行文件，静态站点已输出到 public。`);
