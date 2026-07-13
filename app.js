@@ -2587,6 +2587,38 @@ function stayTimeCell(need) {
   `;
 }
 
+function mountNeedSortHeader() {
+  const header = $("#needsTable thead th:last-child");
+  if (!header) return;
+  const wrapper = document.createElement("div");
+  wrapper.className = "needs-action-header";
+  const label = document.createElement("span");
+  label.textContent = "操作";
+  const select = document.createElement("select");
+  select.id = "needSort";
+  select.setAttribute("aria-label", "排序方式");
+  select.title = "选择入住需求排序方式";
+  [
+    ["uploadDesc", "新→旧", "上传时间：最新优先"],
+    ["uploadAsc", "旧→新", "上传时间：最早优先"],
+    ["checkInAsc", "入住↑", "入住日期：早到晚"],
+    ["checkInDesc", "入住↓", "入住日期：晚到早"]
+  ].forEach(([value, shortLabel, fullLabel]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = shortLabel;
+    option.title = fullLabel;
+    option.selected = value === needSortMode;
+    select.append(option);
+  });
+  wrapper.append(label, select);
+  header.replaceChildren(wrapper);
+  select.addEventListener("change", () => {
+    needSortMode = select.value;
+    renderNeeds();
+  });
+}
+
 function renderNeeds() {
   const rows = currentSortedNeeds()
     .map((need, index) => ({
@@ -2603,20 +2635,6 @@ function renderNeeds() {
   const peopleCount = rows.reduce((sum, need) => sum + peopleForNeed(need).length, 0);
   const nightCount = rows.reduce((sum, need) => sum + needNightCount(need), 0);
   $("#needsSummary").textContent = `共 ${rows.length} 条需求，${peopleCount} 人，${nightCount} 间夜`;
-  const sortOptions = [
-    ["uploadDesc", "新→旧", "上传时间：最新优先"],
-    ["uploadAsc", "旧→新", "上传时间：最早优先"],
-    ["checkInAsc", "入住↑", "入住日期：早到晚"],
-    ["checkInDesc", "入住↓", "入住日期：晚到早"]
-  ];
-  const sortHeader = `
-    <div class="needs-action-header">
-      <span>操作</span>
-      <select id="needSort" aria-label="排序方式" title="选择入住需求排序方式">
-        ${sortOptions.map(([value, shortLabel, fullLabel]) => `<option value="${value}" title="${fullLabel}" ${value === needSortMode ? "selected" : ""}>${shortLabel}</option>`).join("")}
-      </select>
-    </div>
-  `;
   $("#needsTable").innerHTML = table([
     { key: "sequence", label: "序号" },
     { key: "nameList", label: "姓名", html: true },
@@ -2631,13 +2649,10 @@ function renderNeeds() {
     { key: "roomType", label: "房间类型" },
     { key: "note", label: "备注" }
   ], rows, (row) => `
-    <button class="mini-btn" data-edit-need="${row.id}">编辑</button>
-    <button class="mini-btn danger-mini-btn" data-delete-need="${row.id}">删除</button>
-  `, sortHeader);
-  $("#needSort")?.addEventListener("change", (event) => {
-    needSortMode = event.target.value;
-    renderNeeds();
-  });
+    <button class="mini-btn" data-edit-need="${escapeHtml(row.id)}">编辑</button>
+    <button class="mini-btn danger-mini-btn" data-delete-need="${escapeHtml(row.id)}">删除</button>
+  `);
+  mountNeedSortHeader();
 }
 
 function renderOnsite() {

@@ -3,7 +3,7 @@ const globals = require("globals");
 
 module.exports = [
   {
-    ignores: ["node_modules/**", ".vercel/**", "coverage/**"]
+    ignores: ["node_modules/**", ".vercel/**", "public/**", "coverage/**"]
   },
   js.configs.recommended,
   {
