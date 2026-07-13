@@ -5,7 +5,16 @@ const uploadTaskStorageKey = `${storageKey}.pendingNeedUpload`;
 const clientIdStorageKey = `${storageKey}.clientId`;
 const syncOutboxStorageKey = `${storageKey}.syncOutbox`;
 const lastSyncStorageKey = `${storageKey}.lastSyncAt`;
+const uploadTaskMaxAgeMs = 72 * 60 * 60 * 1000;
+const outboxMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
+const maxStoredOutboxItems = 200;
+const maxUploadFileBytes = 10 * 1024 * 1024;
+const maxUploadRows = 5000;
+const maxZipEntries = 2000;
+const maxZipUncompressedBytes = 50 * 1024 * 1024;
+const maxWorkbookSheets = 50;
 const { analyzeNeedMerge, applyOperationToState } = window.ClientSyncUtils;
+const { escapeHtml } = window.HtmlUtils;
 
 const sampleData = {
   hotels: [
@@ -64,14 +73,22 @@ function remotePayload(payload, baseVersion = remoteStateVersion) {
 function loadSyncOutbox() {
   try {
     const value = JSON.parse(localStorage.getItem(syncOutboxStorageKey) || "[]");
-    return Array.isArray(value) ? value : [];
+    const cutoff = Date.now() - outboxMaxAgeMs;
+    return Array.isArray(value)
+      ? value.filter((item) => !item?.createdAt || Date.parse(item.createdAt) >= cutoff).slice(-maxStoredOutboxItems)
+      : [];
   } catch {
     return [];
   }
 }
 
 function saveSyncOutbox(items) {
-  localStorage.setItem(syncOutboxStorageKey, JSON.stringify(items));
+  const limited = items.slice(-maxStoredOutboxItems);
+  try {
+    localStorage.setItem(syncOutboxStorageKey, JSON.stringify(limited));
+  } catch (error) {
+    throw new Error(`浏览器无法保存待同步修改，请先不要关闭页面并立即重试同步。${error?.name === "QuotaExceededError" ? "本地存储空间已满。" : ""}`);
+  }
 }
 
 function pendingSyncCount() {
@@ -137,17 +154,22 @@ function addDatesToEventRange(dates) {
 }
 
 function loadState() {
-  const stored = localStorage.getItem(storageKey);
+  const stored = sessionStorage.getItem(storageKey) || localStorage.getItem(storageKey);
   if (!stored) return structuredClone(sampleData);
   try {
-    return JSON.parse(stored);
+    const parsed = JSON.parse(stored);
+    sessionStorage.setItem(storageKey, stored);
+    localStorage.removeItem(storageKey);
+    return parsed;
   } catch {
+    localStorage.removeItem(storageKey);
+    sessionStorage.removeItem(storageKey);
     return structuredClone(sampleData);
   }
 }
 
 function saveState() {
-  localStorage.setItem(storageKey, JSON.stringify(state));
+  saveLocalStateOnly();
   scheduleRemoteSave();
 }
 
@@ -164,7 +186,12 @@ function setSyncStatus(message, type = "") {
 }
 
 function saveLocalStateOnly() {
-  localStorage.setItem(storageKey, JSON.stringify(state));
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(state));
+    localStorage.removeItem(storageKey);
+  } catch (error) {
+    console.warn("无法缓存当前页面数据", error);
+  }
 }
 
 function replayOutbox(remoteState, items = loadSyncOutbox()) {
@@ -198,7 +225,7 @@ async function loadRemoteState(options = {}) {
     setSyncStatus(pendingSyncCount() ? "已连接，正在补传" : "共享数据已同步", pendingSyncCount() ? "" : "ok");
     if (options.processOutbox !== false && pendingSyncCount()) processRemoteOutbox();
     return true;
-  } catch (error) {
+  } catch {
     remoteSyncReady = false;
     setSyncStatus("未连接共享数据", "bad");
     scheduleReconnect();
@@ -310,7 +337,13 @@ function queueRemoteOperation(payload) {
   const items = loadSyncOutbox();
   if (!items.some((item) => item.id === queuedPayload.operationId)) {
     items.push({ id: queuedPayload.operationId, createdAt: new Date().toISOString(), payload: queuedPayload });
-    saveSyncOutbox(items);
+    try {
+      saveSyncOutbox(items);
+    } catch (error) {
+      setSyncStatus("修改未进入待同步队列", "bad");
+      alert(error.message);
+      throw error;
+    }
   }
   setSyncStatus(remoteSyncReady ? "正在保存共享数据" : "修改已加入待同步队列", remoteSyncReady ? "" : "bad");
   if (remoteSyncReady && navigator.onLine !== false) processRemoteOutbox();
@@ -341,7 +374,7 @@ async function processRemoteOutbox() {
       }
     }
     if (!pendingSyncCount()) setSyncStatus("共享数据已保存", "ok");
-  } catch (error) {
+  } catch {
     remoteSyncReady = false;
     setSyncStatus("同步失败，可点击重试", "bad");
     scheduleReconnect();
@@ -369,18 +402,6 @@ function saveNeedState(need, meta = {}) {
     operationType: meta.operationType,
     operationDescription: meta.operationDescription,
     batchId: need.uploadBatchId || ""
-  });
-}
-
-function saveNeedsState(needs, meta = {}) {
-  saveLocalStateOnly();
-  queueRemoteOperation({
-    action: "upsertNeeds",
-    needs,
-    baseNeeds: meta.baseNeeds || [],
-    operationType: meta.operationType,
-    operationDescription: meta.operationDescription,
-    batchId: meta.batchId || ""
   });
 }
 
@@ -446,7 +467,12 @@ function createNeedUploadTask(needs) {
 }
 
 function savePendingUploadTask(task) {
-  localStorage.setItem(uploadTaskStorageKey, JSON.stringify(task));
+  const persisted = { ...task, expiresAt: task.expiresAt || new Date(Date.now() + uploadTaskMaxAgeMs).toISOString() };
+  try {
+    localStorage.setItem(uploadTaskStorageKey, JSON.stringify(persisted));
+  } catch (error) {
+    throw new Error(`无法保存上传进度，请缩小文件后重试。${error?.name === "QuotaExceededError" ? "浏览器本地存储空间已满。" : ""}`);
+  }
 }
 
 function loadPendingUploadTask() {
@@ -454,6 +480,10 @@ function loadPendingUploadTask() {
   if (!stored) return null;
   try {
     const task = JSON.parse(stored);
+    if (task?.expiresAt && Date.parse(task.expiresAt) < Date.now()) {
+      clearPendingUploadTask();
+      return null;
+    }
     return task?.needs?.length ? task : null;
   } catch {
     return null;
@@ -467,11 +497,6 @@ function clearPendingUploadTask() {
 function pendingUploadNeedIdSet() {
   const task = loadPendingUploadTask();
   return new Set((task?.needs || []).map((need) => need.id).filter(Boolean));
-}
-
-function isPendingUploadNeed(need) {
-  if (!need?.id) return false;
-  return pendingUploadNeedIdSet().has(need.id);
 }
 
 function visibleNeeds() {
@@ -562,17 +587,6 @@ async function ensureRemoteForUpload() {
   if (remoteSyncReady) return;
   const loaded = await loadRemoteState();
   if (!loaded) throw new Error("共享数据未连接，请稍后再试。");
-}
-
-async function refreshSharedStateAfterUpload() {
-  const result = await syncUploadPayload({ action: "cleanupDuplicates" });
-  if (result?.state) {
-    state = result.state;
-    saveLocalStateOnly();
-    render();
-  }
-  remoteSyncReady = true;
-  setSyncStatus("共享数据已保存", "ok");
 }
 
 async function uploadNeedTaskOnce(task) {
@@ -831,11 +845,6 @@ function normalizedRoomType(type) {
   return text || "未填";
 }
 
-function typeCountText(needs) {
-  const counts = needTypeCounts(needs);
-  return Object.entries(counts).map(([type, count]) => `${type}${count}`).join(" / ") || "无需求";
-}
-
 function roomTypeCountText(needs) {
   const counts = needTypeCounts(needs);
   return roomTypeOptions.map((type) => `${type}${counts[type] || 0}`).join(" / ");
@@ -918,15 +927,6 @@ function overlaps(aIn, aOut, bIn, bOut) {
   return aIn < bOut && bIn < aOut;
 }
 
-function bookingFor(roomId, date) {
-  return state.bookings.find((booking) => (
-    booking.roomId === roomId &&
-    booking.status !== "取消" &&
-    date >= booking.checkIn &&
-    date < booking.checkOut
-  ));
-}
-
 function conflicts(roomId, checkIn, checkOut, ignoreId = "") {
   return state.bookings.filter((booking) => (
     booking.roomId === roomId &&
@@ -959,16 +959,6 @@ function unmetRangesForNeed(need) {
       .flatMap((booking) => nightsBetween(booking.checkIn, booking.checkOut))
   );
   return rangesFromDates(requiredDates.filter((date) => !coveredDates.has(date)));
-}
-
-function roomStatus(roomId, date) {
-  const booking = bookingFor(roomId, date);
-  if (!booking) return { status: "空闲", className: "pill-free", label: "空闲" };
-  if (booking.status === "异常") return { status: "异常", className: "pill-problem", label: "异常" };
-  if (booking.checkedIn === "是") return { status: "已入住", className: "pill-checked", label: "已入住" };
-  if (booking.confirmed === "是") return { status: "已确认", className: "pill-confirmed", label: "已确认" };
-  if (booking.purpose === "备用" || booking.purpose === "自己人") return { status: "预留", className: "pill-reserved", label: booking.purpose };
-  return { status: "已分配", className: "pill-assigned", label: "已分配" };
 }
 
 function filteredText(item) {
@@ -1173,16 +1163,6 @@ const roomCapacityTotals = Object.fromEntries(arrangementHotelOptions.map((hotel
   ]))
 ]));
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  })[char]);
-}
-
 function downloadBlob(filename, content, type) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -1217,7 +1197,7 @@ async function exportOverviewWorkbook() {
     });
     if (!response.ok) {
       const result = await response.json().catch(() => ({}));
-      throw new Error(result.message || `HTTP ${response.status}`);
+      throw new Error(result.error || result.message || `HTTP ${response.status}`);
     }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -1259,41 +1239,8 @@ function downloadNeedTemplate() {
   downloadBlob("入住需求批量上传模板.xls", html, "application/vnd.ms-excel;charset=utf-8");
 }
 
-function excelCellHtml(cell) {
-  const value = typeof cell === "object" && cell !== null ? cell.value : cell;
-  return escapeHtml(value).replace(/\n/g, "<br>");
-}
-
-function excelCellAttributes(cell) {
-  if (typeof cell !== "object" || cell === null) return "";
-  return [
-    cell.colspan ? ` colspan="${cell.colspan}"` : "",
-    cell.rowspan ? ` rowspan="${cell.rowspan}"` : "",
-    cell.className ? ` class="${escapeHtml(cell.className)}"` : ""
-  ].join("");
-}
-
-function downloadStyledTable(filename, rows) {
-  const tableHtml = rows.map((row, rowIndex) => {
-    return `<tr>${row.map((cell) => {
-      const isHeader = rowIndex === 0 || (typeof cell === "object" && cell !== null && cell.header);
-      const tag = isHeader ? "th" : "td";
-      return `<${tag}${excelCellAttributes(cell)}>${excelCellHtml(cell)}</${tag}>`;
-    }).join("")}</tr>`;
-  }).join("");
-  const styles = `
-    <style>
-      table { border-collapse: collapse; font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 12pt; }
-      th, td { border: 1px solid #333; padding: 8px 10px; text-align: center; vertical-align: middle; mso-number-format: "\\@"; white-space: normal; }
-      th { background: #f2f4f7; font-weight: 700; }
-    </style>
-  `;
-  const html = `<!doctype html><html><head><meta charset="utf-8">${styles}</head><body><table>${tableHtml}</table></body></html>`;
-  downloadBlob(filename, html, "application/vnd.ms-excel;charset=utf-8");
-}
-
 function worksheetName(name, usedNames) {
-  const base = String(name || "工作表").replace(/[\\/:?*\[\]]/g, " ").slice(0, 31).trim() || "工作表";
+  const base = String(name || "工作表").replace(/[\\/:?*[\]]/g, " ").slice(0, 31).trim() || "工作表";
   let candidate = base;
   let index = 2;
   while (usedNames.has(candidate)) {
@@ -1731,28 +1678,37 @@ function readZipDirectory(buffer) {
   const decoder = new TextDecoder();
   const endOffset = findEndOfCentralDirectory(view);
   const entryCount = view.getUint16(endOffset + 10, true);
+  if (entryCount > maxZipEntries) throw new Error(`Excel 内部文件过多，最多允许 ${maxZipEntries} 个条目。`);
   let offset = view.getUint32(endOffset + 16, true);
   if (entryCount === 0xffff || offset === 0xffffffff) {
     throw new Error("该 Excel 使用了超大文件结构，请在 Excel/WPS 中另存为普通 .xlsx 后再上传。");
   }
   const entries = new Map();
+  let totalUncompressedBytes = 0;
 
   for (let index = 0; index < entryCount; index += 1) {
     if (view.getUint32(offset, true) !== 0x02014b50) break;
     const method = view.getUint16(offset + 10, true);
     const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
     const nameLength = view.getUint16(offset + 28, true);
     const extraLength = view.getUint16(offset + 30, true);
     const commentLength = view.getUint16(offset + 32, true);
     const localOffset = view.getUint32(offset + 42, true);
     const nameStart = offset + 46;
     const name = decoder.decode(bytes.slice(nameStart, nameStart + nameLength));
+    if (!name || name.includes("../") || name.startsWith("/")) throw new Error("Excel 文件包含不安全的内部路径。");
+    totalUncompressedBytes += uncompressedSize;
+    if (totalUncompressedBytes > maxZipUncompressedBytes) {
+      throw new Error(`Excel 解压后内容过大，最多允许 ${Math.round(maxZipUncompressedBytes / 1024 / 1024)} MB。`);
+    }
 
     const localNameLength = view.getUint16(localOffset + 26, true);
     const localExtraLength = view.getUint16(localOffset + 28, true);
     const dataStart = localOffset + 30 + localNameLength + localExtraLength;
     entries.set(name, {
       method,
+      uncompressedSize,
       data: bytes.slice(dataStart, dataStart + compressedSize)
     });
     offset = nameStart + nameLength + extraLength + commentLength;
@@ -1779,6 +1735,9 @@ async function zipEntryText(entries, path) {
   if (entry.method === 8) data = await inflateRaw(data);
   if (entry.method !== 0 && entry.method !== 8) {
     throw new Error("暂不支持这个 xlsx 文件的压缩格式。");
+  }
+  if (data.byteLength > maxZipUncompressedBytes || (entry.uncompressedSize && data.byteLength !== entry.uncompressedSize)) {
+    throw new Error("Excel 文件解压后的大小与目录信息不一致。");
   }
   return new TextDecoder().decode(data);
 }
@@ -1808,6 +1767,7 @@ async function xlsxWorksheetCandidates(entries, preferredNames = []) {
       || ""
   })).map((sheet) => ({ ...sheet, path: rels.get(sheet.relId) || "" })).filter((sheet) => sheet.path);
   if (!sheets.length) throw new Error("没有找到 Excel 里的工作表。");
+  if (sheets.length > maxWorkbookSheets) throw new Error(`Excel 工作表过多，最多允许 ${maxWorkbookSheets} 个。`);
   return sheets.sort((a, b) => {
     const aIndex = preferredNames.indexOf(a.name);
     const bIndex = preferredNames.indexOf(b.name);
@@ -1831,7 +1791,9 @@ function xlsxCellValue(cell, sharedStrings) {
 
 function parseWorksheetRows(xml, sharedStrings) {
   const doc = parseXmlDocument(xml, "Excel 工作表");
-  return xmlChildren(doc, "row").map((row) => {
+  const sourceRows = xmlChildren(doc, "row");
+  if (sourceRows.length > maxUploadRows + 20) throw new Error(`Excel 数据行过多，最多允许 ${maxUploadRows} 行。`);
+  return sourceRows.map((row) => {
     const values = [];
     xmlChildren(row, "c").forEach((cell, fallbackIndex) => {
       const ref = cell.getAttribute("r") || "";
@@ -1864,6 +1826,10 @@ async function parseXlsxBatchRecords(file, kind = "need") {
 }
 
 async function parseBatchRecordsFromFile(file, kind = "need") {
+  if (!file || file.size <= 0) throw new Error("文件内容为空。");
+  if (file.size > maxUploadFileBytes) {
+    throw new Error(`上传文件过大，最多允许 ${Math.round(maxUploadFileBytes / 1024 / 1024)} MB。`);
+  }
   const fileName = String(file.name || "").toLowerCase();
   const zippedExcel = /\.(xlsx|xlsm|xltx)$/i.test(fileName)
     || [
@@ -1871,7 +1837,11 @@ async function parseBatchRecordsFromFile(file, kind = "need") {
       "application/vnd.ms-excel.sheet.macroenabled.12",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
     ].includes(String(file.type || "").toLowerCase());
-  if (zippedExcel) return parseXlsxBatchRecords(file, kind);
+  if (zippedExcel) {
+    const records = await parseXlsxBatchRecords(file, kind);
+    if (records.length > maxUploadRows) throw new Error(`数据行过多，最多允许 ${maxUploadRows} 行。`);
+    return records;
+  }
 
   if (/\.xls$/i.test(fileName)) {
     const signature = Array.from(new Uint8Array(await file.slice(0, 8).arrayBuffer()))
@@ -1887,13 +1857,15 @@ async function parseBatchRecordsFromFile(file, kind = "need") {
   }
   const content = await file.text();
   if (!content.trim()) throw new Error("文件内容为空。");
-  return parseRoomBatchRows(content, kind);
+  const records = parseRoomBatchRows(content, kind);
+  if (records.length > maxUploadRows) throw new Error(`数据行过多，最多允许 ${maxUploadRows} 行。`);
+  return records;
 }
 
 function normalizeDateValue(value) {
   const text = String(value || "")
     .trim()
-    .replace(/[\/.\u5e74\u6708]/g, "-")
+    .replace(/[/.年月]/g, "-")
     .replace(/\u65e5/g, "")
     .replace(/\s+/g, " ");
   if (/^\d+(\.\d+)?$/.test(text)) {
@@ -2177,6 +2149,23 @@ async function importNeedBatch(file) {
     throw new Error("没有识别到可导入的入住需求，请使用下载模板填写后再上传。");
   }
   const needs = needsFromBatchRecords(records);
+  const peopleTotal = peopleCountForNeeds(needs);
+  const missingHotels = needs.filter((need) => !need.hotel).length;
+  const missingDates = needs.filter((need) => !need.checkIn || !need.checkOut).length;
+  const confirmation = await showUploadDialog({
+    title: "确认批量上传",
+    message: "文件已完成解析和规则校验。确认后才会正式写入共享数据。",
+    meta: [
+      `<span>文件：${escapeHtml(file.name)}</span>`,
+      `<span>需求：${needs.length} 条</span>`,
+      `<span>人员：${peopleTotal} 人</span>`,
+      `<span>待补酒店：${missingHotels} 条</span>`,
+      `<span>待补日期：${missingDates} 条</span>`
+    ].join(""),
+    primaryText: "确认上传",
+    secondaryText: "取消"
+  });
+  if (confirmation !== "primary") return;
   const task = createNeedUploadTask(needs);
   savePendingUploadTask(task);
   await runNeedUploadTask(task);
@@ -2243,7 +2232,7 @@ function renderHeatmap() {
   const header = [`<div class="heat-cell header sticky-col">酒店</div>`, ...dates.map((date) => `<div class="heat-cell header">${date.slice(5)}</div>`)];
   const rows = hotels.flatMap((hotel) => {
     return [
-      `<div class="heat-cell hotel-name sticky-col">${hotel}<small>入住需求</small></div>`,
+      `<div class="heat-cell hotel-name sticky-col">${escapeHtml(hotel)}<small>入住需求</small></div>`,
       ...dates.map((date) => {
         const needs = needStaysOnDate(date, hotel);
         const className = needs.length >= 5 ? "status-red" : needs.length > 0 ? "status-yellow" : "status-green";
@@ -2316,7 +2305,7 @@ function renderUseBars() {
   const max = Math.max(1, ...Object.values(counts));
   $("#useBars").innerHTML = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([purpose, count]) => `
     <div class="bar-row">
-      <span>${purpose}</span>
+      <span>${escapeHtml(purpose)}</span>
       <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count / max * 100)}%"></div></div>
       <strong>${count}</strong>
     </div>
@@ -2336,7 +2325,7 @@ function renderHotelBars() {
   const max = Math.max(1, ...Object.values(counts));
   $("#hotelBars").innerHTML = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([hotel, count]) => `
     <div class="bar-row">
-      <span>${hotel}</span>
+      <span>${escapeHtml(hotel)}</span>
       <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count / max * 100)}%"></div></div>
       <strong>${count}</strong>
     </div>
@@ -2368,7 +2357,6 @@ function populateFilters() {
   setSelectOptions("#needHotelFilter", hotelOptions);
   setSelectOptions("#needIdentityFilter", roleOptions);
   if ($("#onsiteDate")) $("#onsiteDate").innerHTML = dateOptions;
-  const dates = activeDates();
   if (!$("#calendarStartInput").value) $("#calendarStartInput").value = defaultHotelInfoRange.start;
   if (!$("#calendarEndInput").value) $("#calendarEndInput").value = defaultHotelInfoRange.end;
   refreshCalendarDateRange();
@@ -2397,7 +2385,7 @@ function renderCalendar() {
   }
   const header = [`<div class="board-cell header">酒店</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
   const rows = hotels.flatMap((hotel) => [
-    `<div class="board-cell room-name">${hotel}<small>按入住需求统计</small></div>`,
+    `<div class="board-cell room-name">${escapeHtml(hotel)}<small>按入住需求统计</small></div>`,
     ...dates.map((date) => {
       const needs = needStaysOnDate(date, hotel, selectedIdentity);
       return `
@@ -2426,7 +2414,7 @@ function renderRoleStats() {
   }
   const header = [`<div class="board-cell header">人员性质</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
   const rows = identities.flatMap((identity) => [
-    `<div class="board-cell room-name">${identity}<small>按人员性质统计</small></div>`,
+    `<div class="board-cell room-name">${escapeHtml(identity)}<small>按人员性质统计</small></div>`,
     ...dates.map((date) => {
       const needs = roleNeedsOnDate(date, identity, selectedHotel);
       return `
@@ -2455,7 +2443,7 @@ function renderRoomBalance() {
   }
   const header = [`<div class="board-cell header">酒店</div>`, ...dates.map((date) => `<div class="board-cell header">${date}</div>`)];
   const rows = hotels.flatMap((hotel) => [
-    `<div class="board-cell room-name">${hotel}<small>剩余 / 总共</small></div>`,
+    `<div class="board-cell room-name">${escapeHtml(hotel)}<small>剩余 / 总共</small></div>`,
     ...dates.map((date) => `
       <div class="board-cell hotel-info-cell">
         <div class="room-type-counts">${roomBalanceCountLines(date, hotel)}</div>
@@ -2463,26 +2451,6 @@ function renderRoomBalance() {
     `)
   ]);
   $("#roomBalanceBoard").innerHTML = `<div class="board-grid" style="grid-template-columns: 136px repeat(${dates.length}, minmax(124px, 1fr))">${[...header, ...rows].join("")}</div>`;
-}
-
-function populateAssignmentForm() {
-  const pendingNeedRanges = visibleNeeds()
-    .filter((need) => need.status !== "已取消")
-    .flatMap((need) => unmetRangesForNeed(need).map((range, index) => ({ need, range, index })));
-  $("#needSelect").innerHTML = pendingNeedRanges.length
-    ? pendingNeedRanges.map(({ need, range, index }) => `
-      <option value="${need.id}-${index}" data-need-id="${need.id}" data-check-in="${range.start}" data-check-out="${range.end}">
-        ${need.name}｜${need.identity}｜${need.people}人｜待满足 ${range.start} 至 ${range.end}
-      </option>
-    `).join("")
-    : `<option value="">暂无待满足日期需求</option>`;
-  syncAssignmentDatesFromNeed();
-  if (selectedAssignmentNeed()) {
-    if (!$("#checkInInput").value) $("#checkInInput").value = activeDates()[0];
-    if (!$("#checkOutInput").value) $("#checkOutInput").value = activeDates()[1] || defaultDate(1);
-  }
-  refreshAssignmentDateRange();
-  updateRoomOptions();
 }
 
 function selectedAssignmentNeed() {
@@ -2561,30 +2529,9 @@ function updateConflictBox() {
   }
 }
 
-function renderAssignments() {
-  const rows = state.bookings
-    .filter((booking) => filteredText({ ...booking, need: needById(booking.needId)?.name, room: roomLabel(booking.roomId) }).includes(getSearch()))
-    .slice()
-    .reverse();
-  if (!rows.length) {
-    $("#assignmentList").innerHTML = `<div class="assignment"><strong>暂无安排记录</strong><span>创建安排后会显示在这里。</span></div>`;
-    return;
-  }
-  $("#assignmentList").innerHTML = rows.map((booking) => {
-    const need = needById(booking.needId);
-    return `
-      <div class="assignment">
-        <strong>${need?.name || "未知对象"} → ${roomLabel(booking.roomId)}</strong>
-        <span>${booking.checkIn} 至 ${booking.checkOut}｜${booking.people}人｜${booking.status}</span>
-        <span>${booking.note || "无备注"}</span>
-      </div>
-    `;
-  }).join("");
-}
-
 function table(headers, rows, rowActions, actionHeader = "操作") {
   return `
-    <thead><tr>${headers.map((h) => `<th>${h.label}</th>`).join("")}<th>${actionHeader}</th></tr></thead>
+    <thead><tr>${headers.map((h) => `<th>${escapeHtml(h.label)}</th>`).join("")}<th>${escapeHtml(actionHeader)}</th></tr></thead>
     <tbody>
       ${rows.map((row) => `
         <tr>
@@ -2600,12 +2547,12 @@ function formatCell(value, header) {
   if (header.html) return value || "";
   if (header.pill) {
     const cls = value === "未分配" || value === "异常" ? "pill-problem" : value === "已分配" || value === "否" ? "pill-assigned" : "pill-confirmed";
-    return `<span class="pill ${cls}">${value || ""}</span>`;
+    return `<span class="pill ${cls}">${escapeHtml(value || "")}</span>`;
   }
   if (header.multiline) {
-    return String(value || "").split("\n").filter(Boolean).map((line) => `<div class="compact-lines">${line}</div>`).join("");
+    return String(value || "").split("\n").filter(Boolean).map((line) => `<div class="compact-lines">${escapeHtml(line)}</div>`).join("");
   }
-  return value ?? "";
+  return escapeHtml(value ?? "");
 }
 
 function refreshNeedAssignmentStatus(need) {
@@ -2616,23 +2563,6 @@ function refreshNeedAssignmentStatus(need) {
     return;
   }
   need.status = unmetRangesForNeed(need).length ? "部分分配" : "已分配";
-}
-
-function assignmentSummaryForNeed(needId) {
-  const bookings = state.bookings.filter((booking) => booking.needId === needId && booking.status !== "取消");
-  return {
-    assignedRoomTime: bookings.map((booking) => `
-      <div class="assigned-booking-line">
-        <span>${roomLabel(booking.roomId)}｜${booking.checkIn} 至 ${booking.checkOut}</span>
-        <button class="mini-btn danger-mini-btn" type="button" data-delete-booking="${booking.id}">删除</button>
-      </div>
-    `).join("")
-  };
-}
-
-function companionSummary(companions) {
-  if (!Array.isArray(companions) || !companions.length) return "";
-  return companions.map((person) => person.name || person.phone || "未命名").join("、");
 }
 
 function peopleForNeed(need) {
@@ -2710,23 +2640,6 @@ function renderNeeds() {
   });
 }
 
-function renderRooms() {
-  const rooms = state.rooms.filter((room) => filteredText({ ...room, hotel: hotelName(room.hotel || room.hotelId) }).includes(getSearch()));
-  $("#roomsSummary").textContent = `共 ${rooms.length} 间房，覆盖 ${state.hotels.length} 家酒店`;
-  $("#roomCards").innerHTML = rooms.map((room) => `
-    <article class="room-card">
-      <h3>${hotelName(room.hotel || room.hotelId)} ${room.roomNo}</h3>
-      <p>${room.type}</p>
-      <div class="room-meta">
-        <span>楼层：${room.floor}</span>
-        <span>可住：${room.capacity}人</span>
-        <span>可用：${room.availableFrom || "未设"} 至 ${room.availableTo || "未设"}</span>
-      </div>
-      <button class="mini-btn" data-edit-room="${room.id}">编辑</button>
-    </article>
-  `).join("");
-}
-
 function renderOnsite() {
   const date = $("#onsiteDate").value || activeDates()[0];
   const hotel = $("#onsiteHotel").value || "all";
@@ -2801,7 +2714,7 @@ function openDialog(title, fields, initial, onSave) {
   $("#dialogFields").innerHTML = fields.map((field) => {
     if (field.type === "hidden") {
       const value = initial[field.key] ?? field.default ?? "";
-      return `<input name="${field.key}" type="hidden" value="${value}">`;
+      return `<input name="${escapeHtml(field.key)}" type="hidden" value="${escapeHtml(value)}">`;
     }
     const full = field.type === "textarea" || field.type === "dateRange" ? " full" : "";
     const value = initial[field.key] ?? field.default ?? "";
@@ -2810,17 +2723,17 @@ function openDialog(title, fields, initial, onSave) {
       const endValue = initial[field.endKey] ?? "";
       return `
         <div class="${full} dialog-field">
-          <span class="dialog-field-label">${field.label}</span>
+          <span class="dialog-field-label">${escapeHtml(field.label)}</span>
           <div class="date-range-picker" data-date-range>
-            <input type="hidden" name="${field.startKey}" value="${startValue}" data-range-hidden-start>
-            <input type="hidden" name="${field.endKey}" value="${endValue}" data-range-hidden-end>
+            <input type="hidden" name="${escapeHtml(field.startKey)}" value="${escapeHtml(startValue)}" data-range-hidden-start>
+            <input type="hidden" name="${escapeHtml(field.endKey)}" value="${escapeHtml(endValue)}" data-range-hidden-end>
             <button class="date-range-trigger" type="button" data-range-trigger>
-              <span data-range-summary>${formatRangeSummary(startValue, endValue)}</span>
+              <span data-range-summary>${escapeHtml(formatRangeSummary(startValue, endValue))}</span>
               <span class="date-range-calendar-icon" aria-hidden="true"></span>
             </button>
             <div class="date-range-panel" data-range-panel hidden>
-              <input type="hidden" value="${startValue}" data-range-start>
-              <input type="hidden" value="${endValue}" data-range-end>
+              <input type="hidden" value="${escapeHtml(startValue)}" data-range-start>
+              <input type="hidden" value="${escapeHtml(endValue)}" data-range-end>
               <div class="date-range-body">
                 <section class="date-calendar">
                   <div class="date-calendar-head">
@@ -2860,12 +2773,12 @@ function openDialog(title, fields, initial, onSave) {
       `;
     }
     if (field.type === "select") {
-      return `<label class="${full}">${field.label}<select name="${field.key}">${field.options.map((option) => `<option value="${escapeHtml(option)}" ${option === value ? "selected" : ""}>${option || "未安排"}</option>`).join("")}</select></label>`;
+      return `<label class="${full}">${escapeHtml(field.label)}<select name="${escapeHtml(field.key)}">${field.options.map((option) => `<option value="${escapeHtml(option)}" ${option === value ? "selected" : ""}>${escapeHtml(option || "未安排")}</option>`).join("")}</select></label>`;
     }
     if (field.type === "textarea") {
-      return `<label class="${full}">${field.label}<textarea name="${field.key}" rows="3">${value}</textarea></label>`;
+      return `<label class="${full}">${escapeHtml(field.label)}<textarea name="${escapeHtml(field.key)}" rows="3">${escapeHtml(value)}</textarea></label>`;
     }
-    return `<label class="${full}">${field.label}<input name="${field.key}" type="${field.type || "text"}" value="${value}"></label>`;
+    return `<label class="${full}">${escapeHtml(field.label)}<input name="${escapeHtml(field.key)}" type="${escapeHtml(field.type || "text")}" value="${escapeHtml(value)}"></label>`;
   }).join("");
   $("#editDialog").showModal();
 }
@@ -2981,6 +2894,11 @@ function bindEvents() {
     clearTimeout(reconnectTimer);
     remoteSyncReady = false;
     setSyncStatus("网络离线，修改会稍后同步", "bad");
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!editing && !uploadInProgress && !pendingSyncCount() && !loadPendingUploadTask()) return;
+    event.preventDefault();
+    event.returnValue = "";
   });
   $("#needHotelFilter")?.addEventListener("change", renderNeeds);
   $("#needIdentityFilter")?.addEventListener("change", renderNeeds);
@@ -3257,21 +3175,30 @@ function bindEvents() {
   $("#dialogForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (!editing) return;
+    const submitButton = event.submitter || $("#dialogForm button[type='submit']");
+    if (submitButton?.disabled) return;
+    if (submitButton) submitButton.disabled = true;
     let result;
     try {
       result = editing.onSave(dialogValues());
     } catch (error) {
       alert(error.message);
+      if (submitButton) submitButton.disabled = false;
       return;
     }
-    if (result?.type === "need") {
-      saveNeedState(result.need, {
-        baseNeed: result.baseNeed,
-        operationType: result.operationType,
-        operationDescription: result.operationDescription
-      });
-    } else {
-      saveState();
+    try {
+      if (result?.type === "need") {
+        saveNeedState(result.need, {
+          baseNeed: result.baseNeed,
+          operationType: result.operationType,
+          operationDescription: result.operationDescription
+        });
+      } else {
+        saveState();
+      }
+    } catch {
+      if (submitButton) submitButton.disabled = false;
+      return;
     }
     $("#editDialog").close();
     editing = null;
@@ -3314,4 +3241,30 @@ async function initializeApp() {
   await resumePendingUploadIfNeeded();
 }
 
-initializeApp();
+function showRuntimeError(message) {
+  let banner = document.querySelector("#runtimeErrorBanner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "runtimeErrorBanner";
+    banner.className = "runtime-error-banner";
+    banner.setAttribute("role", "alert");
+    document.body.append(banner);
+  }
+  banner.textContent = message || "页面出现异常，请刷新后重试。";
+  banner.hidden = false;
+}
+
+window.addEventListener("error", (event) => {
+  console.error("页面运行异常", event.error || event.message);
+  showRuntimeError("页面出现异常，当前未保存操作可能没有生效，请刷新后重试。");
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("未处理的异步异常", event.reason);
+  showRuntimeError(event.reason?.message || "网络操作失败，请检查网络后重试。");
+});
+
+initializeApp().catch((error) => {
+  console.error("应用初始化失败", error);
+  showRuntimeError("页面初始化失败，请刷新页面；若仍失败，请记录当前时间并联系维护人员。");
+});

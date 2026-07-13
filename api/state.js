@@ -12,7 +12,7 @@ const {
 } = require("../lib/state-utils");
 
 const FEISHU_BASE_URL = process.env.FEISHU_BASE_URL || "https://open.feishu.cn";
-const FEISHU_APP_TOKEN = process.env.FEISHU_APP_TOKEN || process.env.FEISHU_BITABLE_APP_TOKEN || "Mg3abeaEya2QptsxOjIchxSLndd";
+const FEISHU_APP_TOKEN = process.env.FEISHU_APP_TOKEN || process.env.FEISHU_BITABLE_APP_TOKEN || "";
 const SYNC_TABLE_NAME = process.env.FEISHU_SYNC_TABLE_NAME || "系统同步数据";
 const SYNC_RECORD_KEY = process.env.FEISHU_SYNC_RECORD_KEY || "hotel-room-state-v1";
 const NEED_TABLE_NAME = "住宿需求核心表";
@@ -54,8 +54,13 @@ let readableTableCache = {};
 let readableSchemaReady = {};
 let coreTableCache = {};
 let coreSchemaReady = {};
+/** @type {Promise<unknown>} */
 let mutationChain = Promise.resolve();
 let dailyBackupReadyDate = "";
+const requestBuckets = new Map();
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_READS = 180;
+const RATE_LIMIT_WRITES = 60;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -96,16 +101,68 @@ async function fetchJsonWithRetry(url, options = {}, retryOptions = {}) {
   throw lastError || new Error("网络请求失败");
 }
 
-function json(res, status, body) {
+function requestHost(req) {
+  const headers = req.headers || {};
+  return String(headers["x-forwarded-host"] || headers.host || "").split(",")[0].trim();
+}
+
+function requestProtocol(req) {
+  const headers = req.headers || {};
+  return String(headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http")).split(",")[0].trim();
+}
+
+function isAllowedBrowserOrigin(req) {
+  const origin = String(req.headers?.origin || "").trim();
+  if (!origin) return true;
+  const configuredOrigins = String(process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  const sameOrigin = `${requestProtocol(req)}://${requestHost(req)}`;
+  return new Set([sameOrigin, ...configuredOrigins]).has(origin.replace(/\/$/, ""));
+}
+
+function applySecurityHeaders(req, res) {
+  const origin = String(req.headers?.origin || "").trim();
+  if (origin && isAllowedBrowserOrigin(req)) {
+    res.setHeader("access-control-allow-origin", origin);
+    res.setHeader("vary", "Origin");
+  }
+  res.setHeader("access-control-allow-methods", "GET,PUT,POST,OPTIONS");
+  res.setHeader("access-control-allow-headers", "content-type,x-maintenance-token");
+  res.setHeader("cross-origin-resource-policy", "same-origin");
+  res.setHeader("referrer-policy", "same-origin");
+  res.setHeader("x-frame-options", "DENY");
+}
+
+function json(req, res, status, body) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("cache-control", "private, no-store, max-age=0");
   res.setHeader("pragma", "no-cache");
   res.setHeader("x-content-type-options", "nosniff");
-  res.setHeader("access-control-allow-origin", "*");
-  res.setHeader("access-control-allow-methods", "GET,PUT,POST,OPTIONS");
-  res.setHeader("access-control-allow-headers", "content-type");
+  applySecurityHeaders(req, res);
   res.end(JSON.stringify(body));
+}
+
+function safeTokenEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ""));
+  const rightBuffer = Buffer.from(String(right || ""));
+  return leftBuffer.length === rightBuffer.length && leftBuffer.length > 0 && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function assertMaintenanceAccess(req, body) {
+  if (!["cleanupDuplicates", "refreshViews"].includes(body?.action) && !body?.state) return;
+  const expected = process.env.MAINTENANCE_TOKEN;
+  if (!expected) {
+    throw new ValidationError("维护功能未配置安全令牌，当前已停用。", 503, "MAINTENANCE_DISABLED");
+  }
+  if (!safeTokenEqual(req.headers?.["x-maintenance-token"], expected)) {
+    throw new ValidationError("无权执行维护操作。", 403, "MAINTENANCE_FORBIDDEN");
+  }
+  if (body?.state && process.env.ALLOW_LEGACY_STATE_SAVE !== "true") {
+    throw new ValidationError("旧版整库覆盖接口已停用。", 410, "LEGACY_STATE_SAVE_DISABLED");
+  }
 }
 
 async function readJsonBody(req) {
@@ -137,6 +194,38 @@ function logEvent(level, event, details = {}) {
   else console.info(payload);
 }
 
+function requestIp(req) {
+  return String(req.headers?.["x-forwarded-for"] || req.socket?.remoteAddress || "unknown").split(",")[0].trim();
+}
+
+function enforceRateLimit(req) {
+  const now = Date.now();
+  const kind = req.method === "GET" ? "read" : "write";
+  const limit = kind === "read" ? RATE_LIMIT_READS : RATE_LIMIT_WRITES;
+  const key = `${requestIp(req)}:${kind}`;
+  const bucket = requestBuckets.get(key);
+  if (!bucket || now - bucket.startedAt >= RATE_LIMIT_WINDOW_MS) {
+    requestBuckets.set(key, { startedAt: now, count: 1 });
+    return;
+  }
+  bucket.count += 1;
+  if (bucket.count > limit) {
+    const error = new ValidationError("请求过于频繁，请稍后再试。", 429, "RATE_LIMITED");
+    error.retryAfter = Math.max(1, Math.ceil((RATE_LIMIT_WINDOW_MS - (now - bucket.startedAt)) / 1000));
+    throw error;
+  }
+  if (requestBuckets.size > 1000) {
+    for (const [bucketKey, value] of requestBuckets) {
+      if (now - value.startedAt >= RATE_LIMIT_WINDOW_MS) requestBuckets.delete(bucketKey);
+    }
+  }
+}
+
+/**
+ * @template T
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
 function enqueueMutation(task) {
   const queued = mutationChain.catch(() => {}).then(task);
   mutationChain = queued.catch(() => {});
@@ -147,8 +236,8 @@ async function tenantAccessToken() {
   if (tokenCache.token && Date.now() < tokenCache.expiresAt) return tokenCache.token;
   const appId = process.env.FEISHU_APP_ID;
   const appSecret = process.env.FEISHU_APP_SECRET;
-  if (!appId || !appSecret) {
-    throw new Error("后端缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET 环境变量。");
+  if (!appId || !appSecret || !FEISHU_APP_TOKEN) {
+    throw new Error("后端缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_APP_TOKEN 环境变量。");
   }
   const { response, body } = await fetchJsonWithRetry(`${FEISHU_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: "POST",
@@ -331,7 +420,7 @@ function chunkArray(items, size = 100) {
   return chunks;
 }
 
-async function batchCreateRecords(tableId, records, tokenSeed = crypto.randomUUID()) {
+async function batchCreateRecords(tableId, records, tokenSeed = String(crypto.randomUUID())) {
   const created = [];
   const chunks = chunkArray(records, 100);
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
@@ -540,9 +629,12 @@ function stateVersion(state) {
 }
 
 function coreKeyMap(records, keyField) {
-  return new Map(activeUniqueRecords(records, keyField)
-    .map((record) => [String(record.fields?.[keyField] || ""), record])
-    .filter(([key]) => key));
+  const result = new Map();
+  activeUniqueRecords(records, keyField).forEach((record) => {
+    const key = String(record.fields?.[keyField] || "");
+    if (key) result.set(key, record);
+  });
+  return result;
 }
 
 function isDeletedRecord(record) {
@@ -1481,14 +1573,6 @@ function readableMirrorTables(state) {
   ];
 }
 
-async function syncReadableMirrorTables(state) {
-  for (const table of readableMirrorTables(state)) {
-    const tableId = await ensureReadableTable(table.name, table.fields);
-    await upsertReadableRecords(tableId, table.keyField, table.rows);
-  }
-  await deleteObsoleteReadableTables();
-}
-
 async function ensureReadableMirrorSchemas(state) {
   const tables = readableMirrorTables(state);
   const knownTables = await allTables();
@@ -1838,24 +1922,28 @@ async function handler(req, res) {
       durationMs: Date.now() - startedAt,
       error: status >= 400 ? body?.error || "" : ""
     });
-    return json(res, status, { ...body, requestId });
+    return json(req, res, status, { ...body, requestId });
   };
 
+  if (!isAllowedBrowserOrigin(req)) return respond(403, { ok: false, error: "不允许跨站访问。", code: "CROSS_ORIGIN_FORBIDDEN" });
   if (req.method === "OPTIONS") return respond(200, { ok: true });
-  if (!["GET", "PUT", "POST"].includes(req.method)) return respond(405, { ok: false, error: "Method not allowed" });
+  if (!["GET", "PUT", "POST"].includes(req.method)) return respond(405, { ok: false, error: "不支持该请求方法。", code: "METHOD_NOT_ALLOWED" });
 
   try {
+    enforceRateLimit(req);
     if (req.method === "GET") {
       const state = await migrateLegacyStateIfNeeded();
       return respond(200, { ok: true, state, version: stateVersion(state), source: "core_tables" });
     }
 
     const body = validateMutationBody(await readJsonBody(req));
+    assertMaintenanceAccess(req, body);
     requestAction = body.action || (body.state ? "legacyStateSave" : "");
     const result = await enqueueMutation(() => processMutation(body, requestId));
     return respond(result.status, result.body);
   } catch (error) {
     const status = Number(error.status) || 500;
+    if (error.retryAfter) res.setHeader("retry-after", String(error.retryAfter));
     logEvent("error", "api_failure", {
       requestId,
       method: req.method,

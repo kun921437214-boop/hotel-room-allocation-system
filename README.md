@@ -10,9 +10,9 @@
 
 `index.html`
 
-如果直接打开本地文件，系统会使用浏览器本地数据。部署到支持 Node/Vercel Serverless API 的环境后，系统会优先连接飞书多维表格共享数据；页面右上角会显示同步状态。
+如果直接打开本地文件，系统只在当前浏览器标签会话中暂存数据，关闭标签后不应把它当作正式数据源。部署到支持 Node/Vercel Serverless API 的环境后，系统会连接飞书多维表格共享数据；页面右上角会显示同步状态。
 
-仍然可以用页面右上角的“导出 JSON”和“导入 JSON”备份或恢复数据。
+线上正式数据以飞书核心表为准。浏览器只保留有过期时间的待重试队列和未完成上传任务，不能替代独立备份。
 
 ## 多人同步
 
@@ -59,7 +59,7 @@
 npm run maintenance:refresh
 ```
 
-如需维护其他部署地址，可设置 `MAINTENANCE_BASE_URL`。脚本只刷新飞书镜像和备份，不修改住宿需求主数据。
+如需维护其他部署地址，可设置 `MAINTENANCE_BASE_URL`。脚本必须同时提供 `MAINTENANCE_TOKEN`，只刷新飞书镜像和备份，不修改住宿需求主数据。
 
 ## 备份恢复
 
@@ -70,6 +70,12 @@ BACKUP_DIR="/你的NAS路径/活动房务备份" npm run backup:file
 ```
 
 可用 `BACKUP_SOURCE_URL` 指定网站地址，`BACKUP_RETENTION_DAYS` 设置保留天数（默认 30 天）。脚本会生成压缩文件和 SHA-256 校验文件，写入后会自动解压复核。可在 NAS 计划任务或 macOS `launchd` 中每天运行。
+
+可随时独立验证某份文件备份：
+
+```bash
+npm run backup:verify -- "/你的NAS路径/活动房务备份/hotel-state-时间.json.gz"
+```
 
 恢复只允许在本机运维环境执行，不提供公开网页恢复入口。先在 `每日备份表` 找到“备份组ID”，然后使用与生产环境相同的飞书环境变量运行：
 
@@ -88,6 +94,12 @@ CONFIRM_RESTORE_BACKUP="备份组ID" RESTORE_OPERATOR="操作人" node scripts/r
 - `FEISHU_SYNC_TABLE_ID`
 - `FEISHU_SYNC_TABLE_NAME`
 - `FEISHU_SYNC_RECORD_KEY`
+- `ALLOWED_ORIGINS`
+- `MAINTENANCE_TOKEN`
+- `ALLOW_LEGACY_STATE_SAVE`，生产环境保持 `false`
+- `BACKUP_SOURCE_URL`
+- `BACKUP_DIR`
+- `BACKUP_RETENTION_DAYS`
 
 注意：`FEISHU_APP_SECRET` 不能写进 `app.js`、`index.html` 或 GitHub 公开仓库，只能配置在后端部署平台的环境变量里。
 
@@ -106,12 +118,26 @@ CONFIRM_RESTORE_BACKUP="备份组ID" RESTORE_OPERATOR="操作人" node scripts/r
 
 ## 主要视图
 
-左侧菜单栏保留四个核心模块：
+左侧菜单栏保留五个核心模块：
 
 - 总览：核心指标、待补信息、人员性质分布和酒店日期统计。
 - 入住需求：维护人员信息、日期、安排酒店、房间号、房间类型和备注。
 - 酒店统计：按酒店和日期查看各房型安排数量。
 - 角色统计：按人员性质和日期查看各房型安排数量。
+- 房间余量：按酒店、日期和房型查看剩余量与总量。
+
+## 开发检查
+
+使用 Node.js 22 LTS 安装依赖后，提交或发布前运行：
+
+```bash
+npm ci
+npm run check
+```
+
+`npm run check` 会依次执行 `lint`、`typecheck`、`test` 和 `build`。GitHub Actions 也会在推送和合并请求时执行同样的质量门禁。
+
+详细的环境配置、健康检查、备份恢复、发布回滚和剩余风险见 `docs/OPERATIONS.md`。
 
 ## 当前数据状态
 

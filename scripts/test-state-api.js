@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 process.env.FEISHU_APP_ID = "test-app";
 process.env.FEISHU_APP_SECRET = "test-secret";
 process.env.FEISHU_APP_TOKEN = "test-base";
+process.env.MAINTENANCE_TOKEN = "test-maintenance-token";
 
 const tableDefinitions = [
   ["need", "住宿需求核心表"],
@@ -35,7 +36,7 @@ function routeParts(pathname) {
   return match ? { tableId: match[1], resource: match[2], id: match[3], action: match[4] } : {};
 }
 
-global.fetch = async (input, options = {}) => {
+global.fetch = /** @type {any} */ (async (input, options = {}) => {
   const url = new URL(input);
   const method = String(options.method || "GET").toUpperCase();
   const payload = options.body ? JSON.parse(options.body) : {};
@@ -99,7 +100,7 @@ global.fetch = async (input, options = {}) => {
     return response({ code: 0, data: { record: created } });
   }
   throw new Error(`未模拟的飞书请求：${method} ${url.pathname} ${JSON.stringify({ tableId, resource, id, action })}`);
-};
+});
 
 const handler = require("../api/state");
 
@@ -112,8 +113,8 @@ function createResponse() {
   };
 }
 
-async function invoke(method, body) {
-  const req = { method, body };
+async function invoke(method, body, headers = {}) {
+  const req = { method, body, headers };
   const res = createResponse();
   await handler(req, res);
   return { status: res.statusCode, headers: res.headers, body: JSON.parse(res.body) };
@@ -139,11 +140,24 @@ function sampleNeed(overrides = {}) {
 }
 
 async function run() {
+  const crossOrigin = await invoke("GET", null, { origin: "https://attacker.example", host: "hotel.example", "x-forwarded-proto": "https" });
+  assert.equal(crossOrigin.status, 403, "跨站浏览器请求必须被拒绝");
+
   const firstGet = await invoke("GET");
   assert.equal(firstGet.status, 200);
   assert.equal(firstGet.body.state.needs.length, 0);
   assert.equal(firstGet.headers["cache-control"], "private, no-store, max-age=0");
+  assert.notEqual(firstGet.headers["access-control-allow-origin"], "*", "接口不得开放任意跨域");
   assert.equal(records.backup.length, 0, "读取接口不应写备份");
+
+  const forbiddenMaintenance = await invoke("PUT", { action: "cleanupDuplicates", baseVersion: firstGet.body.version });
+  assert.equal(forbiddenMaintenance.status, 403, "维护动作必须校验独立令牌");
+
+  const legacySave = await invoke("PUT", {
+    state: firstGet.body.state,
+    baseVersion: firstGet.body.version
+  }, { "x-maintenance-token": process.env.MAINTENANCE_TOKEN });
+  assert.equal(legacySave.status, 410, "旧版整库覆盖入口必须默认关闭");
 
   const operationId = "TEST-UPSERT-1";
   const save = await invoke("PUT", {

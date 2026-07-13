@@ -10,11 +10,15 @@ const stages = String(process.env.MAINTENANCE_STAGES || "schema,backup,people,pe
   .map((stage) => stage.trim())
   .filter(Boolean);
 const runId = process.env.MAINTENANCE_RUN_ID || `VIEW-REFRESH-${new Date().toISOString().slice(0, 10)}`;
+const maintenanceToken = process.env.MAINTENANCE_TOKEN || "";
 
 async function jsonRequest(method, payload) {
   const response = await fetch(`${baseUrl}/api/state`, {
     method,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...(maintenanceToken ? { "x-maintenance-token": maintenanceToken } : {})
+    },
     body: payload ? JSON.stringify(payload) : undefined
   });
   const data = await response.json().catch(() => ({}));
@@ -33,6 +37,7 @@ function stateCounts(state) {
 }
 
 async function run() {
+  if (!maintenanceToken) throw new Error("请先设置 MAINTENANCE_TOKEN，再执行线上维护。");
   const initial = await jsonRequest("GET");
   let expectedVersion = initial.version;
   const initialCounts = stateCounts(initial.state);

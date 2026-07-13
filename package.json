@@ -2,15 +2,30 @@
   "name": "hotel-room-allocation-system",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22 <25"
+  },
   "scripts": {
-    "check": "node --check app.js && node --check api/state.js && node --check api/export-workbook.js && node --check lib/overview-workbook.js && node --check lib/state-utils.js && node --check lib/client-sync-utils.js && node --check scripts/refresh-views.js && node --check scripts/backup-to-file.js && node scripts/test-client-sync.js && node scripts/test-state.js && node scripts/test-state-api.js && node scripts/test-overview-workbook.js",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node scripts/test-client-sync.js && node scripts/test-state.js && node scripts/test-state-api.js && node scripts/test-overview-workbook.js && node scripts/test-security.js",
+    "build": "node scripts/build.js",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "maintenance:refresh": "node scripts/refresh-views.js",
-    "backup:file": "node scripts/backup-to-file.js"
+    "backup:file": "node scripts/backup-to-file.js",
+    "backup:verify": "node scripts/verify-backup.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0"
   },
   "overrides": {
     "uuid": "11.1.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.1",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
+    "typescript": "^5.9.3"
   }
 }

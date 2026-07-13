@@ -28,7 +28,7 @@ async function run() {
 
   assert.deepEqual(workbook.worksheets.map((sheet) => sheet.name), ["总表", "汇总", "工作人员", "评委", "嘉宾", "承办单位", "家长", "其他"]);
   const total = workbook.getWorksheet("总表");
-  assert.deepEqual(total.getRow(1).values.slice(1), [
+  assert.deepEqual(/** @type {any[]} */ (total.getRow(1).values).slice(1), [
     "性质", "序号", "入住人姓名", "房间类型", "入住日期", "退房日期", "入住天数", "电话",
     "身份证号码", "性别", "安排酒店", "房间号", "舱位", "去程航班", "返程航班", "备注"
   ]);
